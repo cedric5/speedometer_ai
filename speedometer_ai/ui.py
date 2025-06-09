@@ -3,14 +3,15 @@ Streamlit web UI for Speedometer AI
 """
 
 import streamlit as st
+import streamlit.components.v1
 import os
 import tempfile
 import pandas as pd
 from pathlib import Path
 import plotly.express as px
 import plotly.graph_objects as go
-from .core import SpeedometerAnalyzer, QuotaExceededError
-from .utils import (
+from speedometer_ai.core import SpeedometerAnalyzer, QuotaExceededError
+from speedometer_ai.utils import (
     extract_frames_from_video, 
     save_results_to_csv, 
     validate_video_file,
@@ -33,13 +34,81 @@ def main():
     with st.sidebar:
         st.header("Configuration")
         
-        # API Key input
-        api_key = st.text_input(
-            "Gemini API Key", 
-            type="password",
-            value=os.getenv('GEMINI_API_KEY', ''),
-            help="Enter your Google Gemini API key"
-        )
+        # API Key input with persistent localStorage
+        # Initialize API key from environment or localStorage simulation
+        if 'api_key' not in st.session_state:
+            st.session_state.api_key = os.getenv('GEMINI_API_KEY', '')
+        
+        # Create the API key input
+        api_key_container = st.container()
+        with api_key_container:
+            api_key = st.text_input(
+                "Gemini API Key", 
+                type="password",
+                value=st.session_state.api_key,
+                help="Enter your Google Gemini API key (automatically saved in browser for future sessions)",
+                key="gemini_api_key"
+            )
+        
+        # Add localStorage JavaScript functionality
+        st.components.v1.html(f"""
+        <script>
+        // Save API key to localStorage when it changes
+        function saveApiKeyToStorage() {{
+            const apiKeyInput = window.parent.document.querySelector('input[aria-label="Gemini API Key"]');
+            if (apiKeyInput && apiKeyInput.value && apiKeyInput.value.trim()) {{
+                localStorage.setItem('speedometer_ai_api_key', apiKeyInput.value.trim());
+                console.log('API key saved to localStorage');
+            }}
+        }}
+        
+        // Load API key from localStorage on page load
+        function loadApiKeyFromStorage() {{
+            const storedKey = localStorage.getItem('speedometer_ai_api_key');
+            if (storedKey && storedKey.trim()) {{
+                const apiKeyInput = window.parent.document.querySelector('input[aria-label="Gemini API Key"]');
+                if (apiKeyInput && !apiKeyInput.value) {{
+                    apiKeyInput.value = storedKey;
+                    apiKeyInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    console.log('API key loaded from localStorage');
+                }}
+            }}
+        }}
+        
+        // Auto-save when user types (with debounce)
+        let saveTimeout;
+        function setupAutoSave() {{
+            const apiKeyInput = window.parent.document.querySelector('input[aria-label="Gemini API Key"]');
+            if (apiKeyInput) {{
+                apiKeyInput.addEventListener('input', function() {{
+                    clearTimeout(saveTimeout);
+                    saveTimeout = setTimeout(saveApiKeyToStorage, 1000); // Save after 1 second of no typing
+                }});
+                
+                apiKeyInput.addEventListener('blur', saveApiKeyToStorage); // Save when field loses focus
+            }}
+        }}
+        
+        // Initialize everything
+        setTimeout(() => {{
+            loadApiKeyFromStorage();
+            setupAutoSave();
+        }}, 500);
+        
+        // Also try to load after a longer delay in case Streamlit is slow
+        setTimeout(loadApiKeyFromStorage, 2000);
+        </script>
+        """, height=0)
+        
+        # Update session state when API key changes
+        if api_key and api_key != st.session_state.api_key:
+            st.session_state.api_key = api_key
+        
+        # Show status about API key storage
+        if api_key:
+            st.success("🔑 API key is set and will be saved for future sessions")
+        else:
+            st.info("💡 Enter your API key above - it will be saved automatically")
         
         # Analysis settings
         st.subheader("Analysis Settings")
@@ -54,16 +123,16 @@ def main():
                                index=0,
                                help="Choose the Gemini model:\n• Flash: Fastest & cheapest ($0.075/$0.30 per 1M tokens)\n• Pro: Most accurate but expensive ($1.25/$5.00 per 1M tokens)\n• 2.0 Experimental: Latest features, FREE during experimental period but very low quota limits")
             
-            parallel_workers = st.slider("Parallel workers", 1, 20, 10, 1, 
+            parallel_workers = st.slider("Parallel workers", 1, 20, 3, 1, 
                                         help="Number of parallel API calls (higher = faster but more load)")
             
-            st.subheader("AI-Powered Data Processing")
-            anomaly_detection = st.checkbox("AI anomaly detection & correction", True,
-                                           help="Use AI to detect and correct speed misreadings (e.g., 90 read as 60)")
+            st.subheader("Rule-Based Data Processing")
+            anomaly_detection = st.checkbox("Anomaly detection & correction", True,
+                                           help="Use rule-based algorithms to detect and correct speed misreadings (e.g., OCR digit confusion)")
             max_acceleration = st.slider("Max car acceleration (km/h/s)", 5.0, 30.0, 16.95, 0.05,
-                                       help="Maximum realistic acceleration for your car - used by AI for anomaly detection")
-            interpolate_gaps = st.checkbox("AI gap filling", True,
-                                         help="Use AI to intelligently fill missing speed readings using surrounding data and physics")
+                                       help="Maximum realistic acceleration for your car - used for physics validation")
+            interpolate_gaps = st.checkbox("Gap filling & smoothing", True,
+                                         help="Use rule-based interpolation and smoothing to fill missing readings and ensure smooth speed lines")
             
             st.subheader("Output Options")
             keep_frames = st.checkbox("Keep extracted frames", False)
@@ -88,7 +157,45 @@ def main():
                 temp_video_path = Path(tmp_file.name)
             
             st.success(f"✅ Video uploaded: {uploaded_file.name}")
-            st.video(uploaded_file)
+            
+            # Create container for video with ID
+            video_container = st.container()
+            with video_container:
+                st.video(uploaded_file, start_time=0)
+                
+            # Add JavaScript to enable video time control
+            st.components.v1.html("""
+            <script>
+            // Function to jump video to specific timestamp
+            function jumpVideoToTime(timestamp) {
+                // Find the video element in Streamlit
+                const videos = document.querySelectorAll('video');
+                if (videos.length > 0) {
+                    const video = videos[0]; // Get the first (main) video element
+                    if (video) {
+                        video.currentTime = timestamp;
+                        console.log('Video jumped to:', timestamp, 'seconds');
+                        
+                        // Optional: Show visual feedback
+                        video.style.border = '3px solid #ff4444';
+                        setTimeout(() => {
+                            video.style.border = 'none';
+                        }, 1000);
+                    }
+                } else {
+                    console.log('No video element found');
+                }
+            }
+            
+            // Make function globally available
+            window.jumpVideoToTime = jumpVideoToTime;
+            
+            // Also provide alternative names for compatibility
+            window.jumpToTime = jumpVideoToTime;
+            
+            console.log('Video control functions loaded');
+            </script>
+            """, height=0)
             
             # Validation
             if not validate_video_file(temp_video_path):
@@ -117,12 +224,12 @@ def main():
                     estimated_frames = int(duration * fps)
                     # Use model-specific cost estimation
                     cost_estimate = SpeedometerAnalyzer.estimate_cost(
-                        estimated_frames, model, include_ai_analysis=(anomaly_detection or interpolate_gaps)
+                        estimated_frames, model, include_ai_analysis=False
                     )
                     
                     cost_info = f"📊 **Estimated Analysis**: {estimated_frames} frames (~{duration:.1f}s video) | **Est. Cost**: ${cost_estimate['total_cost_usd']:.4f} USD ({model})"
                     if anomaly_detection or interpolate_gaps:
-                        cost_info += " | Includes AI data analysis"
+                        cost_info += " | Plus rule-based post-processing (no additional cost)"
                     st.info(cost_info)
                 except:
                     st.warning("⚠️ Could not estimate video duration")
@@ -219,19 +326,19 @@ def analyze_video(video_path: Path, api_key: str, model: str, fps: float, delay:
             raw_success_rate = len([r for r in results if r['success']]) / len(results) * 100
             
             if anomaly_detection or interpolate_gaps:
-                status_text.text("🤖 AI analyzing speed data for anomalies and gaps...")
+                status_text.text("🔧 Rule-based analyzing speed data for anomalies and gaps...")
                 try:
-                    results = analyzer.analyze_speed_data_with_ai(results, max_acceleration)
+                    results = analyzer.analyze_speed_data_with_rules(results, max_acceleration)
                 except Exception as e:
-                    st.warning(f"⚠️ AI analysis failed, falling back to rule-based methods: {e}")
-                    # Fallback to original methods if AI fails
+                    st.warning(f"⚠️ Rule-based analysis failed: {e}")
+                    # Manual fallback if the integrated method fails
                     if anomaly_detection:
-                        status_text.text("🔧 Detecting and correcting anomalies (rule-based)...")
+                        status_text.text("🔧 Detecting and correcting anomalies...")
                         from .utils import detect_and_correct_anomalies
                         results = detect_and_correct_anomalies(results, max_change_per_second=max_acceleration)
                     
                     if interpolate_gaps:
-                        status_text.text("🔧 Filling gaps using interpolation (rule-based)...")
+                        status_text.text("🔧 Filling gaps using interpolation...")
                         from .utils import interpolate_missing_speeds
                         results = interpolate_missing_speeds(results, max_gap_size=3)
             
@@ -240,15 +347,18 @@ def analyze_video(video_path: Path, api_key: str, model: str, fps: float, delay:
                 processed_success_rate = len([r for r in results if r['success']]) / len(results) * 100
                 corrected_count = len([r for r in results if r.get('anomaly_corrected', False)])
                 interpolated_count = len([r for r in results if r.get('interpolated', False)])
+                smoothed_count = len([r for r in results if r.get('smoothed', False)])
                 
                 if processed_success_rate > raw_success_rate:
                     improvement = processed_success_rate - raw_success_rate
-                    st.info(f"✨ Data processing improved success rate by {improvement:.1f}% ({raw_success_rate:.1f}% → {processed_success_rate:.1f}%)")
+                    st.info(f"✨ Rule-based processing improved success rate by {improvement:.1f}% ({raw_success_rate:.1f}% → {processed_success_rate:.1f}%)")
                 
                 if corrected_count > 0:
-                    st.success(f"⚠️ Corrected {corrected_count} anomalous AI readings")
+                    st.success(f"⚠️ Corrected {corrected_count} anomalous readings")
                 if interpolated_count > 0:
                     st.success(f"🔮 Interpolated {interpolated_count} missing values")
+                if smoothed_count > 0:
+                    st.success(f"📈 Smoothed {smoothed_count} outlier readings")
             
             # Step 5: Finalize results
             status_text.text("📊 Finalizing results...")
@@ -259,7 +369,8 @@ def analyze_video(video_path: Path, api_key: str, model: str, fps: float, delay:
                 'results': results,
                 'stats': analyzer.get_statistics(),
                 'cost_info': analyzer.get_cost_info(),
-                'video_name': video_path.name
+                'video_name': video_path.name,
+                'video_path': str(video_path)
             }
             
             progress_bar.progress(1.0)
@@ -287,6 +398,7 @@ def display_results(analysis_data):
     stats = analysis_data['stats']
     cost_info = analysis_data.get('cost_info', {})
     video_name = analysis_data['video_name']
+    video_path = analysis_data.get('video_path', None)
     
     # Summary metrics
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -322,37 +434,135 @@ def display_results(analysis_data):
     # Create DataFrame for display
     df = pd.DataFrame(results)
     
-    # Speed chart
+    # Speed chart with timestamp selection
     if len(df[df['success'] == True]) > 0:
-        st.subheader("📈 Speed Progression")
+        st.subheader("📈 Interactive Speed Analysis")
         
         successful_df = df[df['success'] == True].copy()
         
+        # Add timestamp selection functionality
+        st.markdown("**⏰ Video Timestamp Navigation**")
+        st.caption("Use the slider below to explore different timestamps. The chart will highlight the selected point with smooth, responsive updates.")
+        
+        max_time = successful_df['timestamp'].max() if len(successful_df) > 0 else 10.0
+        
+        # Create columns for slider and current selection display
+        slider_col, info_col = st.columns([3, 1])
+        
+        with slider_col:
+            selected_timestamp = st.slider(
+                "Select timestamp to view:",
+                min_value=0.0,
+                max_value=float(max_time),
+                value=0.0,
+                step=0.05,  # Smaller step for smoother interaction
+                format="%.1fs",
+                help="Drag the slider to jump to different timestamps in the video analysis"
+            )
+        
+        with info_col:
+            # Find the closest data point to the selected timestamp
+            if len(successful_df) > 0:
+                closest_idx = (successful_df['timestamp'] - selected_timestamp).abs().idxmin()
+                closest_speed = successful_df.loc[closest_idx, 'speed']
+                st.metric("Speed at Time", f"{closest_speed:.0f} km/h", f"{selected_timestamp:.1f}s")
+        
+        # Video jumping functionality temporarily disabled for performance
+        # Will be re-implemented later with a more efficient approach
+        
+        # Optimized Interactive chart with caching
+        # Create base chart only once and cache it
+        if 'base_chart_data' not in st.session_state or len(st.session_state.get('base_chart_data', {})) == 0:
+            st.session_state.base_chart_data = {
+                'timestamps': successful_df['timestamp'].tolist(),
+                'speeds': successful_df['speed'].tolist(),
+                'max_speed': successful_df['speed'].max(),
+                'min_speed': successful_df['speed'].min()
+            }
+        
+        chart_data = st.session_state.base_chart_data
+        
+        # Find closest point efficiently
+        timestamps_array = chart_data['timestamps']
+        closest_idx = min(range(len(timestamps_array)), 
+                         key=lambda i: abs(timestamps_array[i] - selected_timestamp))
+        selected_point_time = timestamps_array[closest_idx]
+        selected_point_speed = chart_data['speeds'][closest_idx]
+        
+        # Create optimized figure with minimal traces
         fig = go.Figure()
+        
+        # Main speed line (single trace)
         fig.add_trace(go.Scatter(
-            x=successful_df['timestamp'],
-            y=successful_df['speed'],
+            x=chart_data['timestamps'],
+            y=chart_data['speeds'],
             mode='lines+markers',
             name='Speed',
-            line=dict(width=3, color='#1f77b4'),
-            marker=dict(size=6)
+            line=dict(width=2, color='#1f77b4'),
+            marker=dict(size=4),
+            hovertemplate='<b>%{x:.1f}s</b>: %{y:.0f} km/h<extra></extra>'
         ))
         
+        # Selected point (single marker)
+        fig.add_trace(go.Scatter(
+            x=[selected_point_time],
+            y=[selected_point_speed],
+            mode='markers',
+            name='Selected',
+            marker=dict(size=12, color='red', symbol='circle-open', line=dict(width=2)),
+            hovertemplate=f'<b>SELECTED</b><br>{selected_point_time:.1f}s: {selected_point_speed:.0f} km/h<extra></extra>'
+        ))
+        
+        # Optimized layout
         fig.update_layout(
-            title="Speed vs Time",
-            xaxis_title="Time (seconds)",
-            yaxis_title="Speed (km/h)",
-            hovermode='x unified',
-            height=400
+            title=dict(text="Speed Timeline", font=dict(size=16)),
+            xaxis=dict(title="Time (s)", range=[0, max_time]),
+            yaxis=dict(title="Speed (km/h)", range=[chart_data['min_speed']-5, chart_data['max_speed']+5]),
+            hovermode='closest',
+            height=350,
+            showlegend=False,
+            margin=dict(l=50, r=20, t=40, b=40),
+            # Performance optimizations
+            uirevision='chart_data',  # Prevents zoom reset
+            dragmode='pan'  # Faster than zoom for timeline navigation
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        # Add vertical line as shape (faster than vline)
+        fig.add_shape(
+            type="line",
+            x0=selected_timestamp, x1=selected_timestamp,
+            y0=chart_data['min_speed']-5, y1=chart_data['max_speed']+5,
+            line=dict(color="red", width=2, dash="dash")
+        )
+        
+        # Render with performance optimizations
+        st.plotly_chart(
+            fig, 
+            use_container_width=True, 
+            key="speed_chart",
+            config={
+                'displayModeBar': False,  # Hide toolbar for faster rendering
+                'staticPlot': False,
+                'responsive': True
+            }
+        )
+        
+        # Show information about the selected timestamp
+        if len(successful_df) > 0:
+            closest_idx = (successful_df['timestamp'] - selected_timestamp).abs().idxmin()
+            selected_data = successful_df.loc[closest_idx]
+            
+            st.info(
+                f"🎯 **Selected Frame**: {selected_data['filename']} | "
+                f"**Time**: {selected_data['timestamp']:.1f}s | "
+                f"**Speed**: {selected_data['speed']:.0f} km/h"
+            )
     
     # Detailed results table
     st.subheader("📋 Detailed Results")
     
     # Add legend
-    st.caption("**Status Legend:** ✅ AI Read = Direct AI reading | ⚠️ Corrected = AI misread digit, corrected based on context | 🔮 Estimated = AI couldn't read, value interpolated from surrounding data | ❌ Failed = No reading available")
+    st.caption("**Status Legend:** ✅ Rule-based Read = Direct reading | ⚠️ Corrected = Misread digit corrected | 🔮 Estimated = Value interpolated from surrounding data | ❌ Failed = No reading available")
     
     # Format the dataframe for display
     display_df = df.copy()
@@ -364,7 +574,7 @@ def display_results(analysis_data):
             elif row.get('anomaly_corrected', False):
                 return '⚠️ Corrected'
             else:
-                return '✅ AI Read'
+                return '✅ Rule-based Read'
         else:
             return '❌ Failed'
     
