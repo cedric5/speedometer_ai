@@ -34,8 +34,8 @@ from .utils import (
               default=1.0, 
               help='Delay between API calls in seconds (default: 1.0, ignored if parallel)')
 @click.option('--parallel', '-p', 
-              default=5, 
-              help='Number of parallel workers (default: 5, use 1 for sequential)')
+              default=10, 
+              help='Number of parallel workers (default: 10, use 1 for sequential)')
 @click.option('--interpolate/--no-interpolate', 
               default=True, 
               help='Fill gaps in speed data using interpolation (default: True)')

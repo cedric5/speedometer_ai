@@ -48,7 +48,7 @@ def main():
         
         # Advanced options
         with st.expander("Advanced Options"):
-            parallel_workers = st.slider("Parallel workers", 1, 10, 5, 1, 
+            parallel_workers = st.slider("Parallel workers", 1, 20, 10, 1, 
                                         help="Number of parallel API calls (higher = faster but more load)")
             
             st.subheader("Data Processing")

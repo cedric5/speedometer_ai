@@ -29,8 +29,8 @@ pip install -e .
 # Basic usage
 speedometer-ai analyze path/to/dashboard_video.mp4 -k YOUR_GEMINI_API_KEY
 
-# With parallel processing and custom settings
-speedometer-ai analyze video.mp4 -k API_KEY --fps 5 --parallel 8 --verbose
+# With parallel processing and custom settings  
+speedometer-ai analyze video.mp4 -k API_KEY --fps 5 --parallel 15 --verbose
 
 # With custom car acceleration (default: 16.95 km/h/s)
 speedometer-ai analyze video.mp4 -k API_KEY --max-acceleration 20.0
