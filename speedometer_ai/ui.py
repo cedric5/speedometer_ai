@@ -442,7 +442,7 @@ def display_results(analysis_data):
         
         # Add timestamp selection functionality
         st.markdown("**⏰ Video Timestamp Navigation**")
-        st.caption("Use the slider below to explore different timestamps. The chart will highlight the selected point and the video will automatically jump to that time.")
+        st.caption("Use the slider below to explore different timestamps. The chart will highlight the selected point with smooth, responsive updates.")
         
         max_time = successful_df['timestamp'].max() if len(successful_df) > 0 else 10.0
         
@@ -455,7 +455,7 @@ def display_results(analysis_data):
                 min_value=0.0,
                 max_value=float(max_time),
                 value=0.0,
-                step=0.1,
+                step=0.05,  # Smaller step for smoother interaction
                 format="%.1fs",
                 help="Drag the slider to jump to different timestamps in the video analysis"
             )
@@ -467,85 +467,85 @@ def display_results(analysis_data):
                 closest_speed = successful_df.loc[closest_idx, 'speed']
                 st.metric("Speed at Time", f"{closest_speed:.0f} km/h", f"{selected_timestamp:.1f}s")
         
-        # Add video jumping functionality
-        if 'previous_timestamp' not in st.session_state:
-            st.session_state.previous_timestamp = 0.0
-            
-        # Only jump video if timestamp actually changed (avoid infinite loops)
-        if selected_timestamp != st.session_state.previous_timestamp:
-            st.session_state.previous_timestamp = selected_timestamp
-            
-            # JavaScript to jump video to selected timestamp
-            st.components.v1.html(f"""
-            <script>
-            // Wait a bit for the page to be ready, then jump to timestamp
-            setTimeout(() => {{
-                if (window.jumpVideoToTime) {{
-                    window.jumpVideoToTime({selected_timestamp});
-                }} else {{
-                    console.log('Video jump function not available yet');
-                }}
-            }}, 100);
-            </script>
-            """, height=0)
+        # Video jumping functionality temporarily disabled for performance
+        # Will be re-implemented later with a more efficient approach
         
-        # Interactive chart
+        # Optimized Interactive chart with caching
+        # Create base chart only once and cache it
+        if 'base_chart_data' not in st.session_state or len(st.session_state.get('base_chart_data', {})) == 0:
+            st.session_state.base_chart_data = {
+                'timestamps': successful_df['timestamp'].tolist(),
+                'speeds': successful_df['speed'].tolist(),
+                'max_speed': successful_df['speed'].max(),
+                'min_speed': successful_df['speed'].min()
+            }
+        
+        chart_data = st.session_state.base_chart_data
+        
+        # Find closest point efficiently
+        timestamps_array = chart_data['timestamps']
+        closest_idx = min(range(len(timestamps_array)), 
+                         key=lambda i: abs(timestamps_array[i] - selected_timestamp))
+        selected_point_time = timestamps_array[closest_idx]
+        selected_point_speed = chart_data['speeds'][closest_idx]
+        
+        # Create optimized figure with minimal traces
         fig = go.Figure()
         
-        # Main speed line
+        # Main speed line (single trace)
         fig.add_trace(go.Scatter(
-            x=successful_df['timestamp'],
-            y=successful_df['speed'],
+            x=chart_data['timestamps'],
+            y=chart_data['speeds'],
             mode='lines+markers',
             name='Speed',
-            line=dict(width=3, color='#1f77b4'),
-            marker=dict(size=6),
-            hovertemplate=(
-                '<b>Time:</b> %{x:.1f}s<br>'
-                '<b>Speed:</b> %{y:.0f} km/h<br>'
-                '<extra></extra>'
-            )
+            line=dict(width=2, color='#1f77b4'),
+            marker=dict(size=4),
+            hovertemplate='<b>%{x:.1f}s</b>: %{y:.0f} km/h<extra></extra>'
         ))
         
-        # Add vertical line at selected timestamp
-        fig.add_vline(
-            x=selected_timestamp,
-            line_width=3,
-            line_dash="dash",
-            line_color="red",
-            annotation_text=f"📍 {selected_timestamp:.1f}s",
-            annotation_position="top"
-        )
+        # Selected point (single marker)
+        fig.add_trace(go.Scatter(
+            x=[selected_point_time],
+            y=[selected_point_speed],
+            mode='markers',
+            name='Selected',
+            marker=dict(size=12, color='red', symbol='circle-open', line=dict(width=2)),
+            hovertemplate=f'<b>SELECTED</b><br>{selected_point_time:.1f}s: {selected_point_speed:.0f} km/h<extra></extra>'
+        ))
         
-        # Highlight the selected point
-        if len(successful_df) > 0:
-            closest_idx = (successful_df['timestamp'] - selected_timestamp).abs().idxmin()
-            selected_point = successful_df.loc[closest_idx]
-            
-            fig.add_trace(go.Scatter(
-                x=[selected_point['timestamp']],
-                y=[selected_point['speed']],
-                mode='markers',
-                name='Selected Point',
-                marker=dict(size=15, color='red', symbol='circle-open', line=dict(width=3)),
-                hovertemplate=(
-                    '<b>SELECTED POINT</b><br>'
-                    '<b>Time:</b> %{x:.1f}s<br>'
-                    '<b>Speed:</b> %{y:.0f} km/h<br>'
-                    '<extra></extra>'
-                )
-            ))
-        
+        # Optimized layout
         fig.update_layout(
-            title="Speed vs Time - Interactive Timeline",
-            xaxis_title="Time (seconds)",
-            yaxis_title="Speed (km/h)",
+            title=dict(text="Speed Timeline", font=dict(size=16)),
+            xaxis=dict(title="Time (s)", range=[0, max_time]),
+            yaxis=dict(title="Speed (km/h)", range=[chart_data['min_speed']-5, chart_data['max_speed']+5]),
             hovermode='closest',
-            height=400,
-            showlegend=False
+            height=350,
+            showlegend=False,
+            margin=dict(l=50, r=20, t=40, b=40),
+            # Performance optimizations
+            uirevision='chart_data',  # Prevents zoom reset
+            dragmode='pan'  # Faster than zoom for timeline navigation
         )
         
-        st.plotly_chart(fig, use_container_width=True, key="speed_chart")
+        # Add vertical line as shape (faster than vline)
+        fig.add_shape(
+            type="line",
+            x0=selected_timestamp, x1=selected_timestamp,
+            y0=chart_data['min_speed']-5, y1=chart_data['max_speed']+5,
+            line=dict(color="red", width=2, dash="dash")
+        )
+        
+        # Render with performance optimizations
+        st.plotly_chart(
+            fig, 
+            use_container_width=True, 
+            key="speed_chart",
+            config={
+                'displayModeBar': False,  # Hide toolbar for faster rendering
+                'staticPlot': False,
+                'responsive': True
+            }
+        )
         
         # Show information about the selected timestamp
         if len(successful_df) > 0:
