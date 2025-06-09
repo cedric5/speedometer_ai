@@ -34,20 +34,81 @@ def main():
     with st.sidebar:
         st.header("Configuration")
         
-        # API Key input with local storage
+        # API Key input with persistent localStorage
+        # Initialize API key from environment or localStorage simulation
         if 'api_key' not in st.session_state:
             st.session_state.api_key = os.getenv('GEMINI_API_KEY', '')
         
-        api_key = st.text_input(
-            "Gemini API Key", 
-            type="password",
-            value=st.session_state.api_key,
-            help="Enter your Google Gemini API key (will be saved locally for this session)"
-        )
+        # Create the API key input
+        api_key_container = st.container()
+        with api_key_container:
+            api_key = st.text_input(
+                "Gemini API Key", 
+                type="password",
+                value=st.session_state.api_key,
+                help="Enter your Google Gemini API key (automatically saved in browser for future sessions)",
+                key="gemini_api_key"
+            )
         
-        # Save API key to session state
-        if api_key:
+        # Add localStorage JavaScript functionality
+        st.components.v1.html(f"""
+        <script>
+        // Save API key to localStorage when it changes
+        function saveApiKeyToStorage() {{
+            const apiKeyInput = window.parent.document.querySelector('input[aria-label="Gemini API Key"]');
+            if (apiKeyInput && apiKeyInput.value && apiKeyInput.value.trim()) {{
+                localStorage.setItem('speedometer_ai_api_key', apiKeyInput.value.trim());
+                console.log('API key saved to localStorage');
+            }}
+        }}
+        
+        // Load API key from localStorage on page load
+        function loadApiKeyFromStorage() {{
+            const storedKey = localStorage.getItem('speedometer_ai_api_key');
+            if (storedKey && storedKey.trim()) {{
+                const apiKeyInput = window.parent.document.querySelector('input[aria-label="Gemini API Key"]');
+                if (apiKeyInput && !apiKeyInput.value) {{
+                    apiKeyInput.value = storedKey;
+                    apiKeyInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    console.log('API key loaded from localStorage');
+                }}
+            }}
+        }}
+        
+        // Auto-save when user types (with debounce)
+        let saveTimeout;
+        function setupAutoSave() {{
+            const apiKeyInput = window.parent.document.querySelector('input[aria-label="Gemini API Key"]');
+            if (apiKeyInput) {{
+                apiKeyInput.addEventListener('input', function() {{
+                    clearTimeout(saveTimeout);
+                    saveTimeout = setTimeout(saveApiKeyToStorage, 1000); // Save after 1 second of no typing
+                }});
+                
+                apiKeyInput.addEventListener('blur', saveApiKeyToStorage); // Save when field loses focus
+            }}
+        }}
+        
+        // Initialize everything
+        setTimeout(() => {{
+            loadApiKeyFromStorage();
+            setupAutoSave();
+        }}, 500);
+        
+        // Also try to load after a longer delay in case Streamlit is slow
+        setTimeout(loadApiKeyFromStorage, 2000);
+        </script>
+        """, height=0)
+        
+        # Update session state when API key changes
+        if api_key and api_key != st.session_state.api_key:
             st.session_state.api_key = api_key
+        
+        # Show status about API key storage
+        if api_key:
+            st.success("🔑 API key is set and will be saved for future sessions")
+        else:
+            st.info("💡 Enter your API key above - it will be saved automatically")
         
         # Analysis settings
         st.subheader("Analysis Settings")
