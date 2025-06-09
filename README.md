@@ -6,10 +6,10 @@ AI-powered speedometer reading from dashboard video using Google Gemini.
 
 - Extract speed data from dashboard videos using AI vision
 - **Parallel processing** for fast analysis (up to 10x faster)
-- **Anomaly detection** that corrects AI misreadings (e.g., "90" read as "60")
-- **Configurable car acceleration limits** for accurate anomaly detection
+- **AI-powered anomaly detection** that intelligently corrects speed misreadings using physics and context
+- **AI-powered gap filling** that uses surrounding data and car physics to estimate missing values
+- **Configurable car acceleration limits** for accurate AI-powered analysis
 - **Multiple Gemini models** including the latest Gemini 2.0 Flash experimental
-- **Intelligent gap filling** using interpolation when speedometer goes out of view
 - CLI and web UI interfaces
 - Export results to CSV and charts
 - High accuracy with Gemini AI (100% success rate in testing)

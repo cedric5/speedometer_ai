@@ -57,13 +57,13 @@ def main():
             parallel_workers = st.slider("Parallel workers", 1, 20, 10, 1, 
                                         help="Number of parallel API calls (higher = faster but more load)")
             
-            st.subheader("Data Processing")
-            anomaly_detection = st.checkbox("Detect and correct anomalies", True,
-                                           help="Detect and correct AI misreadings (e.g., 90 read as 60)")
+            st.subheader("AI-Powered Data Processing")
+            anomaly_detection = st.checkbox("AI anomaly detection & correction", True,
+                                           help="Use AI to detect and correct speed misreadings (e.g., 90 read as 60)")
             max_acceleration = st.slider("Max car acceleration (km/h/s)", 5.0, 30.0, 16.95, 0.05,
-                                       help="Maximum realistic acceleration for your car in km/h per second")
-            interpolate_gaps = st.checkbox("Fill gaps using interpolation", True,
-                                         help="Automatically fill missing speed readings using surrounding data")
+                                       help="Maximum realistic acceleration for your car - used by AI for anomaly detection")
+            interpolate_gaps = st.checkbox("AI gap filling", True,
+                                         help="Use AI to intelligently fill missing speed readings using surrounding data and physics")
             
             st.subheader("Output Options")
             keep_frames = st.checkbox("Keep extracted frames", False)
@@ -215,15 +215,22 @@ def analyze_video(video_path: Path, api_key: str, model: str, fps: float, delay:
             
             raw_success_rate = len([r for r in results if r['success']]) / len(results) * 100
             
-            if anomaly_detection:
-                status_text.text("🔧 Detecting and correcting anomalies...")
-                from .utils import detect_and_correct_anomalies
-                results = detect_and_correct_anomalies(results, max_change_per_second=max_acceleration)
-            
-            if interpolate_gaps:
-                status_text.text("🔧 Filling gaps using interpolation...")
-                from .utils import interpolate_missing_speeds
-                results = interpolate_missing_speeds(results, max_gap_size=3)
+            if anomaly_detection or interpolate_gaps:
+                status_text.text("🤖 AI analyzing speed data for anomalies and gaps...")
+                try:
+                    results = analyzer.analyze_speed_data_with_ai(results, max_acceleration)
+                except Exception as e:
+                    st.warning(f"⚠️ AI analysis failed, falling back to rule-based methods: {e}")
+                    # Fallback to original methods if AI fails
+                    if anomaly_detection:
+                        status_text.text("🔧 Detecting and correcting anomalies (rule-based)...")
+                        from .utils import detect_and_correct_anomalies
+                        results = detect_and_correct_anomalies(results, max_change_per_second=max_acceleration)
+                    
+                    if interpolate_gaps:
+                        status_text.text("🔧 Filling gaps using interpolation (rule-based)...")
+                        from .utils import interpolate_missing_speeds
+                        results = interpolate_missing_speeds(results, max_gap_size=3)
             
             # Show improvement if processing was applied
             if anomaly_detection or interpolate_gaps:

@@ -38,13 +38,13 @@ from .utils import (
               help='Number of parallel workers (default: 10, use 1 for sequential)')
 @click.option('--interpolate/--no-interpolate', 
               default=True, 
-              help='Fill gaps in speed data using interpolation (default: True)')
+              help='AI-powered gap filling in speed data (default: True)')
 @click.option('--anomaly-detection/--no-anomaly-detection', 
               default=True, 
-              help='Detect and correct speed reading anomalies (default: True)')
+              help='AI-powered anomaly detection and correction (default: True)')
 @click.option('--max-acceleration', 
               default=16.95, 
-              help='Maximum car acceleration in km/h/s for anomaly detection (default: 16.95 km/h/s)')
+              help='Maximum car acceleration in km/h/s for AI analysis (default: 16.95 km/h/s)')
 @click.option('--model', '-m',
               default='gemini-1.5-flash',
               type=click.Choice(['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-exp'], case_sensitive=False),
@@ -176,16 +176,23 @@ def analyze(video_path, api_key, output, fps, delay, parallel, interpolate, anom
             
             sys.exit(1)
         
-        # Step 4: Post-process results
+        # Step 4: Post-process results with AI
         raw_success_rate = len([r for r in results if r['success']]) / len(results) * 100
         
-        if anomaly_detection:
-            click.echo(f"🔧 Detecting and correcting anomalies...")
-            results = detect_and_correct_anomalies(results, max_change_per_second=max_acceleration)
-            
-        if interpolate:
-            click.echo(f"🔧 Filling gaps using interpolation...")
-            results = interpolate_missing_speeds(results, max_gap_size=3)
+        if anomaly_detection or interpolate:
+            click.echo(f"🤖 AI analyzing speed data for anomalies and gaps...")
+            try:
+                results = analyzer.analyze_speed_data_with_ai(results, max_acceleration)
+            except Exception as e:
+                click.echo(f"   ⚠️ AI analysis failed, falling back to rule-based methods: {e}")
+                # Fallback to original methods if AI fails
+                if anomaly_detection:
+                    click.echo(f"🔧 Detecting and correcting anomalies (rule-based)...")
+                    results = detect_and_correct_anomalies(results, max_change_per_second=max_acceleration)
+                    
+                if interpolate:
+                    click.echo(f"🔧 Filling gaps using interpolation (rule-based)...")
+                    results = interpolate_missing_speeds(results, max_gap_size=3)
         
         # Show improvement if processing was applied
         if anomaly_detection or interpolate:

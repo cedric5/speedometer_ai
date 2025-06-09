@@ -299,6 +299,160 @@ Speed reading:"""
         
         return stats
     
+    def analyze_speed_data_with_ai(self, results: List[Dict], max_acceleration: float = 16.95) -> List[Dict]:
+        """
+        Use AI to analyze and correct speed data anomalies and fill gaps
+        
+        Args:
+            results: List of analysis results with speed readings
+            max_acceleration: Maximum realistic acceleration for the car (km/h/s)
+            
+        Returns:
+            AI-corrected results with anomalies fixed and gaps filled
+        """
+        if not results or len(results) < 3:
+            return results
+            
+        # Prepare speed data for AI analysis
+        speed_data = []
+        for i, result in enumerate(results):
+            speed_data.append({
+                'timestamp': result['timestamp'],
+                'speed': result['speed'] if result['success'] else None,
+                'filename': result['filename'],
+                'original_response': result['response']
+            })
+        
+        # Create AI prompt for speed data analysis
+        prompt = self._create_speed_analysis_prompt(speed_data, max_acceleration)
+        
+        try:
+            response = self.model.generate_content(prompt)
+            response_text = response.text.strip()
+            
+            # Track API usage
+            self.api_calls += 1
+            if hasattr(response, 'usage_metadata'):
+                self.total_input_tokens += getattr(response.usage_metadata, 'prompt_token_count', 0)
+                self.total_output_tokens += getattr(response.usage_metadata, 'candidates_token_count', 0)
+            
+            # Parse AI response and apply corrections
+            corrected_results = self._parse_speed_corrections(results, response_text)
+            return corrected_results
+            
+        except Exception as e:
+            # If AI analysis fails, return original results
+            print(f"Warning: AI speed analysis failed: {e}")
+            return results
+    
+    def _create_speed_analysis_prompt(self, speed_data: List[Dict], max_acceleration: float) -> str:
+        """Create prompt for AI speed data analysis"""
+        
+        # Format speed data for the prompt
+        data_text = "\nSpeed readings by timestamp:\n"
+        for item in speed_data:
+            speed_str = f"{item['speed']} km/h" if item['speed'] is not None else "MISSING"
+            data_text += f"  {item['timestamp']:.2f}s: {speed_str}\n"
+        
+        prompt = f"""
+TASK: Analyze car speedometer readings for anomalies and missing data, then provide corrections.
+
+CAR SPECIFICATIONS:
+- Maximum acceleration: {max_acceleration} km/h per second
+- This means speed changes between consecutive readings should be physically realistic
+
+SPEED DATA:{data_text}
+
+ANALYSIS INSTRUCTIONS:
+1. ANOMALY DETECTION:
+   - Look for speed readings that are physically impossible given the car's acceleration limits
+   - Common OCR errors: 0↔6,8,9; 1↔7; 2↔5,8; 3↔8; 5↔6,8; 6↔8,9; 8↔9
+   - Flag readings where speed change exceeds realistic acceleration between timestamps
+   - Consider context from surrounding readings to identify likely misreads
+
+2. GAP FILLING:
+   - Identify MISSING speed readings
+   - Calculate realistic interpolated values based on surrounding data
+   - Ensure interpolated values respect acceleration constraints
+
+3. VALIDATION:
+   - Ensure all speed values are reasonable (typically 50-300 km/h for highway driving)
+   - Maintain smooth progression where physically possible
+   - Preserve original readings when they appear correct
+
+RESPONSE FORMAT:
+Provide corrections as JSON array. For each correction needed, include:
+{{
+  "timestamp": 12.34,
+  "action": "ANOMALY_CORRECTION" or "INTERPOLATION",
+  "original_speed": 90,
+  "corrected_speed": 60,
+  "reason": "OCR likely misread 6 as 9, surrounding context suggests 60 km/h"
+}}
+
+If no corrections needed, respond with: []
+
+CORRECTIONS:"""
+
+        return prompt
+    
+    def _parse_speed_corrections(self, original_results: List[Dict], ai_response: str) -> List[Dict]:
+        """Parse AI response and apply speed corrections"""
+        import json
+        import re
+        
+        corrected_results = [result.copy() for result in original_results]
+        
+        # Initialize flags for all results
+        for result in corrected_results:
+            if 'interpolated' not in result:
+                result['interpolated'] = False
+            if 'anomaly_corrected' not in result:
+                result['anomaly_corrected'] = False
+            if 'ai_analyzed' not in result:
+                result['ai_analyzed'] = True
+        
+        try:
+            # Extract JSON from AI response
+            json_match = re.search(r'\[.*\]', ai_response, re.DOTALL)
+            if not json_match:
+                # Try to find corrections in a different format
+                if "[]" in ai_response or "no corrections" in ai_response.lower():
+                    return corrected_results
+                else:
+                    raise ValueError("No valid JSON found in AI response")
+            
+            corrections = json.loads(json_match.group())
+            
+            # Apply corrections
+            for correction in corrections:
+                timestamp = correction.get('timestamp')
+                action = correction.get('action')
+                corrected_speed = correction.get('corrected_speed')
+                reason = correction.get('reason', 'AI correction')
+                
+                # Find the result with matching timestamp
+                for i, result in enumerate(corrected_results):
+                    if abs(result['timestamp'] - timestamp) < 0.01:  # Small tolerance for floating point
+                        original_speed = result['speed']
+                        corrected_results[i]['speed'] = corrected_speed
+                        corrected_results[i]['success'] = True
+                        
+                        if action == "ANOMALY_CORRECTION":
+                            corrected_results[i]['anomaly_corrected'] = True
+                            corrected_results[i]['response'] = f"AI ANOMALY CORRECTION: Original {original_speed} km/h → {corrected_speed} km/h. {reason} | Original: {result['response']}"
+                        elif action == "INTERPOLATION":
+                            corrected_results[i]['interpolated'] = True
+                            corrected_results[i]['response'] = f"AI INTERPOLATION: Filled missing value with {corrected_speed} km/h. {reason} | Original: {result['response']}"
+                        break
+            
+        except Exception as e:
+            print(f"Warning: Failed to parse AI corrections: {e}")
+            # Return original results if parsing fails
+            return corrected_results
+        
+        return corrected_results
+
     def get_cost_info(self) -> Dict:
         """
         Calculate the cost of API usage based on Gemini pricing
