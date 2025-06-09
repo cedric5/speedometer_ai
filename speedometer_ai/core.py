@@ -343,6 +343,7 @@ Speed reading:"""
         except Exception as e:
             # If AI analysis fails, return original results
             print(f"Warning: AI speed analysis failed: {e}")
+            print(f"AI Response was: {response_text[:500]}...")  # Debug: show first 500 chars
             return results
     
     def _create_speed_analysis_prompt(self, speed_data: List[Dict], max_acceleration: float) -> str:
@@ -441,18 +442,27 @@ CORRECTIONS:"""
                 result['ai_analyzed'] = True
         
         try:
+            # Debug: Print AI response for inspection
+            print(f"DEBUG: AI Response length: {len(ai_response)}")
+            print(f"DEBUG: AI Response preview: {ai_response[:1000]}")
+            
             # Extract JSON from AI response
             json_match = re.search(r'\[.*\]', ai_response, re.DOTALL)
             if not json_match:
                 # Try to find corrections in a different format
                 if "[]" in ai_response or "no corrections" in ai_response.lower():
+                    print("DEBUG: AI indicated no corrections needed")
                     return corrected_results
                 else:
+                    print(f"DEBUG: No JSON found in response: {ai_response}")
                     raise ValueError("No valid JSON found in AI response")
             
+            print(f"DEBUG: Found JSON: {json_match.group()}")
             corrections = json.loads(json_match.group())
+            print(f"DEBUG: Parsed {len(corrections)} corrections")
             
             # Apply corrections
+            corrections_applied = 0
             for correction in corrections:
                 timestamp = correction.get('timestamp')
                 action = correction.get('action')
@@ -468,6 +478,7 @@ CORRECTIONS:"""
                         if self._validate_speed_correction(corrected_results, i, corrected_speed, max_acceleration):
                             corrected_results[i]['speed'] = corrected_speed
                             corrected_results[i]['success'] = True
+                            corrections_applied += 1
                             
                             if action == "ANOMALY_CORRECTION":
                                 corrected_results[i]['anomaly_corrected'] = True
@@ -475,10 +486,14 @@ CORRECTIONS:"""
                             elif action == "INTERPOLATION":
                                 corrected_results[i]['interpolated'] = True
                                 corrected_results[i]['response'] = f"AI INTERPOLATION: Filled missing value with {corrected_speed} km/h. {reason} | Original: {result['response']}"
+                            
+                            print(f"DEBUG: Applied correction at {timestamp:.2f}s: {original_speed} → {corrected_speed}")
                         else:
                             # AI suggestion violates physics - reject it
-                            print(f"Warning: AI suggested correction violates acceleration limits at {timestamp:.2f}s: {original_speed} → {corrected_speed}")
+                            print(f"WARNING: AI suggested correction violates acceleration limits at {timestamp:.2f}s: {original_speed} → {corrected_speed}")
                         break
+            
+            print(f"DEBUG: Applied {corrections_applied} out of {len(corrections)} corrections")
             
         except Exception as e:
             print(f"Warning: Failed to parse AI corrections: {e}")
@@ -500,6 +515,8 @@ CORRECTIONS:"""
         Returns:
             True if correction is physically valid, False otherwise
         """
+        timestamp = results[index]['timestamp']
+        
         # Check with previous reading
         if index > 0:
             prev_result = results[index - 1]
@@ -509,6 +526,7 @@ CORRECTIONS:"""
                 max_allowed_change = max_acceleration * time_diff
                 
                 if speed_change > max_allowed_change:
+                    print(f"DEBUG: Validation failed with PREVIOUS reading - {timestamp:.2f}s: {prev_result['speed']} → {proposed_speed} in {time_diff:.2f}s = {speed_change:.1f} km/h (max: {max_allowed_change:.1f})")
                     return False
         
         # Check with next reading
@@ -520,8 +538,10 @@ CORRECTIONS:"""
                 max_allowed_change = max_acceleration * time_diff
                 
                 if speed_change > max_allowed_change:
+                    print(f"DEBUG: Validation failed with NEXT reading - {timestamp:.2f}s: {proposed_speed} → {next_result['speed']} in {time_diff:.2f}s = {speed_change:.1f} km/h (max: {max_allowed_change:.1f})")
                     return False
         
+        print(f"DEBUG: Validation PASSED for {timestamp:.2f}s: {proposed_speed} km/h")
         return True
     
     @staticmethod
