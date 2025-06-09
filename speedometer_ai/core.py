@@ -469,6 +469,19 @@ CORRECTIONS:"""
                 corrected_speed = correction.get('corrected_speed')
                 reason = correction.get('reason', 'AI correction')
                 
+                print(f"DEBUG: Processing correction - timestamp: {timestamp}, action: {action}, corrected_speed: {corrected_speed} (type: {type(corrected_speed)})")
+                
+                # Ensure corrected_speed is a number
+                if corrected_speed is None:
+                    print(f"DEBUG: Skipping correction with None speed")
+                    continue
+                
+                try:
+                    corrected_speed = float(corrected_speed)
+                except (ValueError, TypeError):
+                    print(f"DEBUG: Could not convert corrected_speed to float: {corrected_speed}")
+                    continue
+                
                 # Find the result with matching timestamp
                 for i, result in enumerate(corrected_results):
                     if abs(result['timestamp'] - timestamp) < 0.01:  # Small tolerance for floating point
@@ -488,6 +501,7 @@ CORRECTIONS:"""
                                 corrected_results[i]['response'] = f"AI INTERPOLATION: Filled missing value with {corrected_speed} km/h. {reason} | Original: {result['response']}"
                             
                             print(f"DEBUG: Applied correction at {timestamp:.2f}s: {original_speed} → {corrected_speed}")
+                            print(f"DEBUG: Verification - result[{i}]['speed'] is now: {corrected_results[i]['speed']}")
                         else:
                             # AI suggestion violates physics - reject it
                             print(f"WARNING: AI suggested correction violates acceleration limits at {timestamp:.2f}s: {original_speed} → {corrected_speed}")
@@ -557,16 +571,16 @@ CORRECTIONS:"""
         """
         pricing = {
             'gemini-1.5-flash': {
-                'input_per_1m': 0.075,
-                'output_per_1m': 0.30
+                'input_per_1m': 0.075,    # $0.075 per 1M input tokens
+                'output_per_1m': 0.30     # $0.30 per 1M output tokens
             },
             'gemini-1.5-pro': {
-                'input_per_1m': 3.50,
-                'output_per_1m': 10.50
+                'input_per_1m': 1.25,     # $1.25 per 1M input tokens
+                'output_per_1m': 5.00     # $5.00 per 1M output tokens
             },
             'gemini-2.0-flash-exp': {
-                'input_per_1m': 0.0375,  # Experimental pricing - may be free or very low cost
-                'output_per_1m': 0.15
+                'input_per_1m': 0.0,      # Free during experimental period
+                'output_per_1m': 0.0      # Free during experimental period
             }
         }
         

@@ -52,7 +52,7 @@ def main():
             model = st.selectbox("Gemini Model", 
                                ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"],
                                index=0,
-                               help="Choose the Gemini model:\n• Flash: Fastest & cheapest ($0.075/$0.30 per 1M tokens)\n• Pro: Most accurate but expensive ($3.50/$10.50 per 1M tokens)\n• 2.0 Experimental: Latest features, moderate cost ($0.0375/$0.15 per 1M tokens) but very low quota limits")
+                               help="Choose the Gemini model:\n• Flash: Fastest & cheapest ($0.075/$0.30 per 1M tokens)\n• Pro: Most accurate but expensive ($1.25/$5.00 per 1M tokens)\n• 2.0 Experimental: Latest features, FREE during experimental period but very low quota limits")
             
             parallel_workers = st.slider("Parallel workers", 1, 20, 10, 1, 
                                         help="Number of parallel API calls (higher = faster but more load)")
