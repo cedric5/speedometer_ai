@@ -12,8 +12,11 @@ from .utils import (
     save_results_to_csv, 
     create_speed_chart,
     print_analysis_summary,
+    print_cost_summary,
     validate_video_file,
-    check_ffmpeg_available
+    check_ffmpeg_available,
+    interpolate_missing_speeds,
+    detect_and_correct_anomalies
 )
 
 
@@ -29,7 +32,19 @@ from .utils import (
               help='Frames per second to extract (default: 3.0)')
 @click.option('--delay', '-d', 
               default=1.0, 
-              help='Delay between API calls in seconds (default: 1.0)')
+              help='Delay between API calls in seconds (default: 1.0, ignored if parallel)')
+@click.option('--parallel', '-p', 
+              default=5, 
+              help='Number of parallel workers (default: 5, use 1 for sequential)')
+@click.option('--interpolate/--no-interpolate', 
+              default=True, 
+              help='Fill gaps in speed data using interpolation (default: True)')
+@click.option('--anomaly-detection/--no-anomaly-detection', 
+              default=True, 
+              help='Detect and correct speed reading anomalies (default: True)')
+@click.option('--max-acceleration', 
+              default=16.95, 
+              help='Maximum car acceleration in km/h/s for anomaly detection (default: 16.95 km/h/s)')
 @click.option('--chart/--no-chart', 
               default=True, 
               help='Generate speed chart (default: True)')
@@ -39,7 +54,7 @@ from .utils import (
 @click.option('--verbose', '-v', 
               is_flag=True, 
               help='Verbose output')
-def analyze(video_path, api_key, output, fps, delay, chart, keep_frames, verbose):
+def analyze(video_path, api_key, output, fps, delay, parallel, interpolate, anomaly_detection, max_acceleration, chart, keep_frames, verbose):
     """
     Analyze speedometer readings from dashboard video using AI
     
@@ -87,51 +102,108 @@ def analyze(video_path, api_key, output, fps, delay, chart, keep_frames, verbose
         frame_files = extract_frames_from_video(video_path, frames_dir, fps)
         click.echo(f"   ✓ Extracted {len(frame_files)} frames")
         
+        # Cost estimation
+        estimated_frames = len(frame_files)
+        estimated_input_tokens = estimated_frames * 1000  # Rough estimate
+        estimated_output_tokens = estimated_frames * 10
+        estimated_cost = (estimated_input_tokens / 1_000_000) * 0.075 + (estimated_output_tokens / 1_000_000) * 0.30
+        click.echo(f"   💰 Estimated cost: ${estimated_cost:.4f} USD for {estimated_frames} frames")
+        
         # Step 2: Initialize analyzer
         click.echo(f"🤖 Initializing Gemini AI analyzer...")
         analyzer = SpeedometerAnalyzer(api_key)
         
         # Step 3: Analyze frames
-        click.echo(f"🔍 Analyzing frames (delay: {delay}s between calls)...")
+        if parallel > 1:
+            click.echo(f"🔍 Analyzing frames with {parallel} parallel workers...")
+        else:
+            click.echo(f"🔍 Analyzing frames sequentially (delay: {delay}s between calls)...")
         
         def progress_callback(current, total, filename):
+            # Get current cost info
+            cost_info = analyzer.get_cost_info()
+            cost_str = f"${cost_info['total_cost_usd']:.4f}" if cost_info['total_cost_usd'] > 0 else "<$0.0001"
+            
             if verbose:
-                click.echo(f"   Analyzing {current}/{total}: {filename}")
+                if parallel > 1:
+                    click.echo(f"   Completed {current}/{total}: {filename} | Cost so far: {cost_str}")
+                else:
+                    click.echo(f"   Analyzing {current}/{total}: {filename} | Cost so far: {cost_str}")
             else:
-                # Simple progress indicator
-                click.echo(f"   Progress: {current}/{total}", nl=False)
+                # Simple progress indicator with cost
+                click.echo(f"   Progress: {current}/{total} | Cost: {cost_str}", nl=False)
                 if current < total:
                     click.echo("\r", nl=False)
                 else:
                     click.echo()
         
         results = analyzer.analyze_video_frames(
-            frames_dir, fps, delay, progress_callback
+            frames_dir, fps, delay, progress_callback, max_workers=parallel
         )
         
-        # Step 4: Save results
+        # Step 4: Post-process results
+        raw_success_rate = len([r for r in results if r['success']]) / len(results) * 100
+        
+        if anomaly_detection:
+            click.echo(f"🔧 Detecting and correcting anomalies...")
+            results = detect_and_correct_anomalies(results, max_change_per_second=max_acceleration)
+            
+        if interpolate:
+            click.echo(f"🔧 Filling gaps using interpolation...")
+            results = interpolate_missing_speeds(results, max_gap_size=3)
+        
+        # Show improvement if processing was applied
+        if anomaly_detection or interpolate:
+            processed_success_rate = len([r for r in results if r['success']]) / len(results) * 100
+            corrected_count = len([r for r in results if r.get('anomaly_corrected', False)])
+            interpolated_count = len([r for r in results if r.get('interpolated', False)])
+            
+            if processed_success_rate > raw_success_rate:
+                improvement = processed_success_rate - raw_success_rate
+                click.echo(f"   ✓ Improved success rate by {improvement:.1f}% ({raw_success_rate:.1f}% → {processed_success_rate:.1f}%)")
+            
+            if corrected_count > 0:
+                click.echo(f"   ✓ Corrected {corrected_count} anomalous readings")
+            if interpolated_count > 0:
+                click.echo(f"   ✓ Interpolated {interpolated_count} missing values")
+        
+        # Step 5: Save results
         csv_path = output / "speed_results.csv"
         save_results_to_csv(results, csv_path)
         click.echo(f"   ✓ Results saved to {csv_path}")
         
-        # Step 5: Generate chart
+        # Step 6: Generate chart
         if chart:
             chart_path = output / "speed_chart.png"
             create_speed_chart(results, chart_path)
             click.echo(f"   ✓ Chart saved to {chart_path}")
         
-        # Step 6: Show summary
+        # Step 7: Show summary
         stats = analyzer.get_statistics()
+        cost_info = analyzer.get_cost_info()
+        
+        # Save results with cost info
+        save_results_to_csv(results, csv_path, cost_info)
         
         if verbose:
             print_analysis_summary(results, stats)
+            print_cost_summary(cost_info)
         else:
             click.echo(f"\n📊 Analysis complete!")
             click.echo(f"   Success rate: {stats.get('success_rate', 0):.1f}%")
             if 'min_speed' in stats:
                 click.echo(f"   Speed range: {stats['min_speed']}-{stats['max_speed']} km/h")
+            
+            # Always show cost
+            click.echo(f"\n💰 Cost:")
+            click.echo(f"   API calls: {cost_info['api_calls']}")
+            if cost_info['total_cost_usd'] > 0:
+                click.echo(f"   Total cost: ${cost_info['total_cost_usd']:.4f} USD")
+            else:
+                click.echo(f"   Total cost: <$0.0001 USD (very low)")
+            click.echo(f"   Model: {cost_info['model']}")
         
-        # Step 7: Cleanup frames if requested
+        # Step 8: Cleanup frames if requested
         if not keep_frames:
             import shutil
             shutil.rmtree(frames_dir)
@@ -165,10 +237,17 @@ def show(csv_path):
         
         # Basic stats
         successful = df[df['success'] == True]
+        ai_readings = df[(df['success'] == True) & (df.get('interpolated', False) == False) & 
+                        (df.get('anomaly_corrected', False) == False)]
+        interpolated = df[df.get('interpolated', False) == True]
+        anomaly_corrected = df[df.get('anomaly_corrected', False) == True]
         
         click.echo(f"Total frames: {len(df)}")
         click.echo(f"Successful readings: {len(successful)}")
         click.echo(f"Success rate: {len(successful)/len(df)*100:.1f}%")
+        click.echo(f"  • Direct AI readings: {len(ai_readings)}")
+        click.echo(f"  • Anomaly corrected: {len(anomaly_corrected)}")
+        click.echo(f"  • Interpolated values: {len(interpolated)}")
         
         if len(successful) > 0:
             speeds = successful['speed'].dropna()
@@ -176,8 +255,17 @@ def show(csv_path):
             click.echo(f"Average speed: {speeds.mean():.1f} km/h")
         
         click.echo(f"\nDetailed timeline:")
+        click.echo(f"  Legend: ✓=AI Read, ⚠=Anomaly Corrected, ~=Interpolated, ✗=Failed")
         for _, row in df.iterrows():
-            status = "✓" if row['success'] else "✗"
+            if row['success']:
+                if row.get('interpolated', False):
+                    status = "~"
+                elif row.get('anomaly_corrected', False):
+                    status = "⚠"
+                else:
+                    status = "✓"
+            else:
+                status = "✗"
             speed = f"{row['speed']:.0f}" if pd.notna(row['speed']) else "N/A"
             click.echo(f"  {status} {row['timestamp']:5.1f}s: {speed:>3} km/h")
             

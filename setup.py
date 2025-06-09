@@ -14,6 +14,9 @@ setup(
         "pandas>=1.3.0",
         "matplotlib>=3.5.0",
         "streamlit>=1.28.0",
+        "plotly>=5.0.0",
+        "pytest>=7.0.0",
+        "pytest-streamlit>=0.3.0",
     ],
     entry_points={
         "console_scripts": [
