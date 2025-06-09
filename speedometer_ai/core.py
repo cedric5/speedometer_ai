@@ -258,9 +258,8 @@ Speed reading:"""
         Returns:
             Dictionary with cost breakdown
         """
-        # Gemini 1.5 Flash pricing (as of 2024)
-        # Input: $0.075 per 1M tokens
-        # Output: $0.30 per 1M tokens
+        # Gemini pricing (as of 2024-2025)
+        # Prices per 1M tokens
         
         pricing = {
             'gemini-1.5-flash': {
@@ -270,6 +269,10 @@ Speed reading:"""
             'gemini-1.5-pro': {
                 'input_per_1m': 3.50,
                 'output_per_1m': 10.50
+            },
+            'gemini-2.0-flash-exp': {
+                'input_per_1m': 0.0375,  # Experimental pricing - may be free or very low cost
+                'output_per_1m': 0.15
             }
         }
         

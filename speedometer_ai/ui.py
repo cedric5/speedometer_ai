@@ -48,6 +48,12 @@ def main():
         
         # Advanced options
         with st.expander("Advanced Options"):
+            st.subheader("AI Model")
+            model = st.selectbox("Gemini Model", 
+                               ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"],
+                               index=0,
+                               help="Choose the Gemini model: Flash is faster/cheaper, Pro is more accurate, 2.0 is the latest experimental")
+            
             parallel_workers = st.slider("Parallel workers", 1, 20, 10, 1, 
                                         help="Number of parallel API calls (higher = faster but more load)")
             
@@ -120,7 +126,7 @@ def main():
             
             # Analysis button
             if st.button("🔍 Analyze Video", type="primary", use_container_width=True):
-                analyze_video(temp_video_path, api_key, fps, delay, parallel_workers, anomaly_detection, max_acceleration, interpolate_gaps, keep_frames, verbose)
+                analyze_video(temp_video_path, api_key, model, fps, delay, parallel_workers, anomaly_detection, max_acceleration, interpolate_gaps, keep_frames, verbose)
     
     with col2:
         st.header("📊 Results")
@@ -132,7 +138,7 @@ def main():
             st.info("Upload a video and click 'Analyze Video' to see results here")
 
 
-def analyze_video(video_path: Path, api_key: str, fps: float, delay: float, parallel_workers: int, anomaly_detection: bool, max_acceleration: float, interpolate_gaps: bool, keep_frames: bool, verbose: bool):
+def analyze_video(video_path: Path, api_key: str, model: str, fps: float, delay: float, parallel_workers: int, anomaly_detection: bool, max_acceleration: float, interpolate_gaps: bool, keep_frames: bool, verbose: bool):
     """Analyze the uploaded video"""
     
     # Create progress indicators
@@ -153,10 +159,10 @@ def analyze_video(video_path: Path, api_key: str, fps: float, delay: float, para
             st.success(f"✅ Extracted {len(frame_files)} frames")
             
             # Step 2: Initialize analyzer
-            status_text.text("🤖 Initializing Gemini AI analyzer...")
+            status_text.text(f"🤖 Initializing Gemini AI analyzer ({model})...")
             progress_bar.progress(0.2)
             
-            analyzer = SpeedometerAnalyzer(api_key)
+            analyzer = SpeedometerAnalyzer(api_key, model_name=model)
             
             # Step 3: Analyze frames
             if parallel_workers > 1:

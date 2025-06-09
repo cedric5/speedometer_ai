@@ -45,6 +45,10 @@ from .utils import (
 @click.option('--max-acceleration', 
               default=16.95, 
               help='Maximum car acceleration in km/h/s for anomaly detection (default: 16.95 km/h/s)')
+@click.option('--model', '-m',
+              default='gemini-1.5-flash',
+              type=click.Choice(['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-exp'], case_sensitive=False),
+              help='Gemini model to use (default: gemini-1.5-flash)')
 @click.option('--chart/--no-chart', 
               default=True, 
               help='Generate speed chart (default: True)')
@@ -54,7 +58,7 @@ from .utils import (
 @click.option('--verbose', '-v', 
               is_flag=True, 
               help='Verbose output')
-def analyze(video_path, api_key, output, fps, delay, parallel, interpolate, anomaly_detection, max_acceleration, chart, keep_frames, verbose):
+def analyze(video_path, api_key, output, fps, delay, parallel, interpolate, anomaly_detection, max_acceleration, model, chart, keep_frames, verbose):
     """
     Analyze speedometer readings from dashboard video using AI
     
@@ -110,8 +114,8 @@ def analyze(video_path, api_key, output, fps, delay, parallel, interpolate, anom
         click.echo(f"   💰 Estimated cost: ${estimated_cost:.4f} USD for {estimated_frames} frames")
         
         # Step 2: Initialize analyzer
-        click.echo(f"🤖 Initializing Gemini AI analyzer...")
-        analyzer = SpeedometerAnalyzer(api_key)
+        click.echo(f"🤖 Initializing Gemini AI analyzer ({model})...")
+        analyzer = SpeedometerAnalyzer(api_key, model_name=model)
         
         # Step 3: Analyze frames
         if parallel > 1:
