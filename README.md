@@ -8,8 +8,7 @@ AI-powered speedometer reading from dashboard video using Google Gemini with rul
 - **Parallel processing** for fast analysis (up to 10x faster)
 - **Rule-based anomaly detection** corrects OCR misreadings using physics constraints and digit confusion patterns
 - **Intelligent gap filling** estimates missing values using linear interpolation with physics validation
-- **Aggressive smoothing** ensures ultra-smooth speed lines by correcting outliers and applying moving averages
-- **Complete data guarantee** - no empty cells in final CSV output
+- **Data smoothing** to ensure a smooth speed line by correcting outliers and applying moving averages
 - **Configurable acceleration limits** for realistic physics validation (default: 16.95 km/h/s)
 - **Multiple Gemini models** including Gemini 1.5 Flash, Pro, and 2.0 Flash experimental
 - **Deterministic results** - same input always produces same output with rule-based processing
@@ -78,8 +77,7 @@ The system uses a hybrid approach combining AI vision with rule-based post-proce
    - **Anomaly Detection**: Corrects OCR misreads using digit confusion patterns (0↔6, 8↔9, etc.)
    - **Physics Validation**: Removes readings that violate acceleration limits
    - **Gap Interpolation**: Fills missing values using linear interpolation
-   - **Aggressive Smoothing**: Creates ultra-smooth speed lines using outlier detection + moving averages
-   - **Complete Data**: Ensures every CSV row has a speed value
+   - **Data Smoothing**: Creates smooth speed lines using outlier detection + moving averages
 
 **Result**: Clean, smooth, complete speed data with detailed processing flags in CSV output.
 
