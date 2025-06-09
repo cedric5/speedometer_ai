@@ -6,7 +6,7 @@ import click
 import os
 import sys
 from pathlib import Path
-from .core import SpeedometerAnalyzer
+from .core import SpeedometerAnalyzer, QuotaExceededError
 from .utils import (
     extract_frames_from_video, 
     save_results_to_csv, 
@@ -141,9 +141,40 @@ def analyze(video_path, api_key, output, fps, delay, parallel, interpolate, anom
                 else:
                     click.echo()
         
-        results = analyzer.analyze_video_frames(
-            frames_dir, fps, delay, progress_callback, max_workers=parallel
-        )
+        try:
+            results = analyzer.analyze_video_frames(
+                frames_dir, fps, delay, progress_callback, max_workers=parallel
+            )
+        except QuotaExceededError as e:
+            click.echo(f"\n{str(e)}")
+            click.echo(f"\n💡 Tip: For Gemini 2.0 models, try: speedometer-ai analyze --model gemini-1.5-flash --parallel 1")
+            sys.exit(1)
+        except Exception as e:
+            error_str = str(e)
+            click.echo(f"\n❌ Analysis failed: {error_str}")
+            
+            # Provide specific guidance based on error type
+            if "429" in error_str or "quota" in error_str.lower():
+                click.echo(f"\n💡 This appears to be a quota/rate limit error. Try:")
+                click.echo(f"   • Reduce parallel workers: --parallel 1")
+                click.echo(f"   • Switch to gemini-1.5-flash: --model gemini-1.5-flash")
+                click.echo(f"   • Wait a few minutes before retrying")
+            elif "api" in error_str.lower() or "key" in error_str.lower():
+                click.echo(f"\n💡 This appears to be an API key issue. Check:")
+                click.echo(f"   • Your API key is valid")
+                click.echo(f"   • You have access to the selected model")
+                click.echo(f"   • Your Gemini API account is active")
+            elif "permission" in error_str.lower() or "access" in error_str.lower():
+                click.echo(f"\n💡 This appears to be a permissions issue. Check:")
+                click.echo(f"   • Your API key has access to the {model} model")
+                click.echo(f"   • The model name is correct")
+            else:
+                click.echo(f"\n💡 General troubleshooting:")
+                click.echo(f"   • Check your internet connection")
+                click.echo(f"   • Verify your API key is correct")
+                click.echo(f"   • Try with --model gemini-1.5-flash --parallel 1")
+            
+            sys.exit(1)
         
         # Step 4: Post-process results
         raw_success_rate = len([r for r in results if r['success']]) / len(results) * 100

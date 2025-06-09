@@ -9,7 +9,7 @@ import pandas as pd
 from pathlib import Path
 import plotly.express as px
 import plotly.graph_objects as go
-from .core import SpeedometerAnalyzer
+from .core import SpeedometerAnalyzer, QuotaExceededError
 from .utils import (
     extract_frames_from_video, 
     save_results_to_csv, 
@@ -52,7 +52,7 @@ def main():
             model = st.selectbox("Gemini Model", 
                                ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"],
                                index=0,
-                               help="Choose the Gemini model: Flash is faster/cheaper, Pro is more accurate, 2.0 is the latest experimental")
+                               help="Choose the Gemini model: Flash is faster/cheaper, Pro is more accurate, 2.0 is the latest experimental (⚠️ very low quota limits)")
             
             parallel_workers = st.slider("Parallel workers", 1, 20, 10, 1, 
                                         help="Number of parallel API calls (higher = faster but more load)")
@@ -186,9 +186,28 @@ def analyze_video(video_path: Path, api_key: str, model: str, fps: float, delay:
                 # Update cost display in real-time
                 cost_display.info(f"💰 **Real-time Cost**: {cost_str} USD | **API Calls**: {cost_info['api_calls']} | **Model**: {cost_info['model']}")
             
-            results = analyzer.analyze_video_frames(
-                frames_dir, fps, delay, progress_callback, max_workers=parallel_workers
-            )
+            try:
+                results = analyzer.analyze_video_frames(
+                    frames_dir, fps, delay, progress_callback, max_workers=parallel_workers
+                )
+            except QuotaExceededError as e:
+                st.error(f"🚫 **Quota Exceeded**\n\n{str(e)}")
+                st.info("💡 **Quick Fix**: Change the model to 'gemini-1.5-flash' and reduce parallel workers to 1-2 in the sidebar settings.")
+                return
+            except Exception as e:
+                error_str = str(e)
+                st.error(f"❌ **Analysis Failed**: {error_str}")
+                
+                # Provide specific guidance
+                if "429" in error_str or "quota" in error_str.lower():
+                    st.warning("💡 **Rate Limit Issue**: Reduce parallel workers and try gemini-1.5-flash model")
+                elif "api" in error_str.lower() or "key" in error_str.lower():
+                    st.warning("💡 **API Key Issue**: Check your API key is valid and has access to the selected model")
+                elif "permission" in error_str.lower():
+                    st.warning(f"💡 **Permission Issue**: Your API key may not have access to the {model} model")
+                else:
+                    st.warning("💡 **Troubleshooting**: Try gemini-1.5-flash model with 1 parallel worker")
+                return
             
             # Step 4: Post-process results
             status_text.text("🔧 Post-processing results...")

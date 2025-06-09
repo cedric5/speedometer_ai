@@ -12,6 +12,13 @@ from PIL import Image
 from typing import List, Dict, Optional, Tuple
 
 
+class QuotaExceededError(Exception):
+    """Custom exception for API quota exceeded errors"""
+    def __init__(self, message: str, retry_after: int = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class SpeedometerAnalyzer:
     """AI-powered speedometer analyzer using Google Gemini"""
     
@@ -79,7 +86,41 @@ Speed reading:"""
             return speed, response_text
             
         except Exception as e:
-            return None, f"Error: {str(e)}"
+            error_str = str(e)
+            
+            # Check for quota exceeded errors (429)
+            if "429" in error_str or "quota" in error_str.lower() or "exceeded" in error_str.lower():
+                # Extract retry delay if available
+                retry_after = None
+                if "retry_delay" in error_str:
+                    try:
+                        import json
+                        # Try to extract retry delay from error message
+                        if "seconds:" in error_str:
+                            parts = error_str.split("seconds:")
+                            if len(parts) > 1:
+                                retry_after = int(parts[1].split()[0])
+                    except:
+                        pass
+                
+                # Create user-friendly quota error message
+                if "gemini-2.0-flash-exp" in error_str:
+                    quota_msg = "❌ Quota exceeded for Gemini 2.0 Flash Experimental model. This model has very low rate limits. Please try:\n" \
+                               "   • Switch to 'gemini-1.5-flash' model (much higher quota)\n" \
+                               "   • Reduce parallel workers (--parallel 1 or 2)\n" \
+                               "   • Wait a few minutes and try again"
+                else:
+                    quota_msg = f"❌ API quota exceeded for model '{self.model_name}'. Please try:\n" \
+                               f"   • Reduce parallel workers (--parallel 1 or 2)\n" \
+                               f"   • Wait a few minutes and try again\n" \
+                               f"   • Check your API quota limits at https://ai.google.dev/gemini-api/docs/rate-limits"
+                
+                if retry_after:
+                    quota_msg += f"\n   • Suggested retry delay: {retry_after} seconds"
+                
+                raise QuotaExceededError(quota_msg, retry_after)
+            
+            return None, f"Error: {error_str}"
     
     def _parse_response(self, response: str) -> Optional[int]:
         """Parse Gemini response to extract speed value"""
@@ -205,7 +246,14 @@ Speed reading:"""
                         progress_callback(completed_count, len(frame_files), result['filename'])
                         
                 except Exception as e:
-                    # Handle individual frame failures
+                    # Check if this is a quota error that should stop everything
+                    if isinstance(e, QuotaExceededError) or "429" in str(e) or "quota" in str(e).lower():
+                        # Cancel all remaining futures
+                        for remaining_future in future_to_index:
+                            remaining_future.cancel()
+                        raise e  # Re-raise quota error to stop analysis
+                    
+                    # Handle other individual frame failures
                     i = future_to_index[future]
                     results[i] = {
                         'frame': i + 1,
