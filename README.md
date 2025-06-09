@@ -21,10 +21,10 @@ pip install -e .
 
 ```bash
 # Basic usage
-speedometer-ai path/to/dashboard_video.mp4 -k YOUR_GEMINI_API_KEY
+speedometer-ai analyze path/to/dashboard_video.mp4 -k YOUR_GEMINI_API_KEY
 
 # With custom settings
-speedometer-ai video.mp4 -k API_KEY --fps 5 --delay 0.5 --verbose
+speedometer-ai analyze video.mp4 -k API_KEY --fps 5 --delay 0.5 --verbose
 
 # View results
 speedometer-ai show results.csv
@@ -44,7 +44,7 @@ Set your API key as an environment variable:
 
 ```bash
 export GEMINI_API_KEY="your_api_key_here"
-speedometer-ai video.mp4
+speedometer-ai analyze video.mp4
 ```
 
 ## Requirements

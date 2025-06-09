@@ -39,7 +39,7 @@ from .utils import (
 @click.option('--verbose', '-v', 
               is_flag=True, 
               help='Verbose output')
-def main(video_path, api_key, output, fps, delay, chart, keep_frames, verbose):
+def analyze(video_path, api_key, output, fps, delay, chart, keep_frames, verbose):
     """
     Analyze speedometer readings from dashboard video using AI
     
@@ -185,6 +185,9 @@ def show(csv_path):
         click.echo(click.style(f"Error reading results: {e}", fg='red'))
 
 
+cli.add_command(analyze)
+
+
 @cli.command()
 def ui():
     """Launch the web UI"""
@@ -208,4 +211,4 @@ def ui():
 
 
 if __name__ == '__main__':
-    main()
+    cli()

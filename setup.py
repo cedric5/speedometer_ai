@@ -17,7 +17,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "speedometer-ai=speedometer_ai.cli:main",
+            "speedometer-ai=speedometer_ai.cli:cli",
         ],
     },
     python_requires=">=3.8",

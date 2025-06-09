@@ -1,0 +1,2 @@
+[console_scripts]
+speedometer-ai = speedometer_ai.cli:cli

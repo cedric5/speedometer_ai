@@ -1,0 +1,13 @@
+README.md
+setup.py
+speedometer_ai/__init__.py
+speedometer_ai/cli.py
+speedometer_ai/core.py
+speedometer_ai/ui.py
+speedometer_ai/utils.py
+speedometer_ai.egg-info/PKG-INFO
+speedometer_ai.egg-info/SOURCES.txt
+speedometer_ai.egg-info/dependency_links.txt
+speedometer_ai.egg-info/entry_points.txt
+speedometer_ai.egg-info/requires.txt
+speedometer_ai.egg-info/top_level.txt

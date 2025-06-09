@@ -1,0 +1,6 @@
+Metadata-Version: 2.1
+Name: speedometer-ai
+Version: 1.0.0
+Summary: AI-powered speedometer reading from dashboard video
+Author: Claude Code
+Requires-Python: >=3.8
