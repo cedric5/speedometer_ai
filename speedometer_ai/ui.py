@@ -3,6 +3,7 @@ Streamlit web UI for Speedometer AI
 """
 
 import streamlit as st
+import streamlit.components.v1
 import os
 import tempfile
 import pandas as pd
@@ -33,13 +34,20 @@ def main():
     with st.sidebar:
         st.header("Configuration")
         
-        # API Key input
+        # API Key input with local storage
+        if 'api_key' not in st.session_state:
+            st.session_state.api_key = os.getenv('GEMINI_API_KEY', '')
+        
         api_key = st.text_input(
             "Gemini API Key", 
             type="password",
-            value=os.getenv('GEMINI_API_KEY', ''),
-            help="Enter your Google Gemini API key"
+            value=st.session_state.api_key,
+            help="Enter your Google Gemini API key (will be saved locally for this session)"
         )
+        
+        # Save API key to session state
+        if api_key:
+            st.session_state.api_key = api_key
         
         # Analysis settings
         st.subheader("Analysis Settings")
@@ -54,7 +62,7 @@ def main():
                                index=0,
                                help="Choose the Gemini model:\n• Flash: Fastest & cheapest ($0.075/$0.30 per 1M tokens)\n• Pro: Most accurate but expensive ($1.25/$5.00 per 1M tokens)\n• 2.0 Experimental: Latest features, FREE during experimental period but very low quota limits")
             
-            parallel_workers = st.slider("Parallel workers", 1, 20, 10, 1, 
+            parallel_workers = st.slider("Parallel workers", 1, 20, 3, 1, 
                                         help="Number of parallel API calls (higher = faster but more load)")
             
             st.subheader("Rule-Based Data Processing")
@@ -88,7 +96,45 @@ def main():
                 temp_video_path = Path(tmp_file.name)
             
             st.success(f"✅ Video uploaded: {uploaded_file.name}")
-            st.video(uploaded_file)
+            
+            # Create container for video with ID
+            video_container = st.container()
+            with video_container:
+                st.video(uploaded_file, start_time=0)
+                
+            # Add JavaScript to enable video time control
+            st.components.v1.html("""
+            <script>
+            // Function to jump video to specific timestamp
+            function jumpVideoToTime(timestamp) {
+                // Find the video element in Streamlit
+                const videos = document.querySelectorAll('video');
+                if (videos.length > 0) {
+                    const video = videos[0]; // Get the first (main) video element
+                    if (video) {
+                        video.currentTime = timestamp;
+                        console.log('Video jumped to:', timestamp, 'seconds');
+                        
+                        // Optional: Show visual feedback
+                        video.style.border = '3px solid #ff4444';
+                        setTimeout(() => {
+                            video.style.border = 'none';
+                        }, 1000);
+                    }
+                } else {
+                    console.log('No video element found');
+                }
+            }
+            
+            // Make function globally available
+            window.jumpVideoToTime = jumpVideoToTime;
+            
+            // Also provide alternative names for compatibility
+            window.jumpToTime = jumpVideoToTime;
+            
+            console.log('Video control functions loaded');
+            </script>
+            """, height=0)
             
             # Validation
             if not validate_video_file(temp_video_path):
@@ -262,7 +308,8 @@ def analyze_video(video_path: Path, api_key: str, model: str, fps: float, delay:
                 'results': results,
                 'stats': analyzer.get_statistics(),
                 'cost_info': analyzer.get_cost_info(),
-                'video_name': video_path.name
+                'video_name': video_path.name,
+                'video_path': str(video_path)
             }
             
             progress_bar.progress(1.0)
@@ -290,6 +337,7 @@ def display_results(analysis_data):
     stats = analysis_data['stats']
     cost_info = analysis_data.get('cost_info', {})
     video_name = analysis_data['video_name']
+    video_path = analysis_data.get('video_path', None)
     
     # Summary metrics
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -325,37 +373,135 @@ def display_results(analysis_data):
     # Create DataFrame for display
     df = pd.DataFrame(results)
     
-    # Speed chart
+    # Speed chart with timestamp selection
     if len(df[df['success'] == True]) > 0:
-        st.subheader("📈 Speed Progression")
+        st.subheader("📈 Interactive Speed Analysis")
         
         successful_df = df[df['success'] == True].copy()
         
+        # Add timestamp selection functionality
+        st.markdown("**⏰ Video Timestamp Navigation**")
+        st.caption("Use the slider below to explore different timestamps. The chart will highlight the selected point and the video will automatically jump to that time.")
+        
+        max_time = successful_df['timestamp'].max() if len(successful_df) > 0 else 10.0
+        
+        # Create columns for slider and current selection display
+        slider_col, info_col = st.columns([3, 1])
+        
+        with slider_col:
+            selected_timestamp = st.slider(
+                "Select timestamp to view:",
+                min_value=0.0,
+                max_value=float(max_time),
+                value=0.0,
+                step=0.1,
+                format="%.1fs",
+                help="Drag the slider to jump to different timestamps in the video analysis"
+            )
+        
+        with info_col:
+            # Find the closest data point to the selected timestamp
+            if len(successful_df) > 0:
+                closest_idx = (successful_df['timestamp'] - selected_timestamp).abs().idxmin()
+                closest_speed = successful_df.loc[closest_idx, 'speed']
+                st.metric("Speed at Time", f"{closest_speed:.0f} km/h", f"{selected_timestamp:.1f}s")
+        
+        # Add video jumping functionality
+        if 'previous_timestamp' not in st.session_state:
+            st.session_state.previous_timestamp = 0.0
+            
+        # Only jump video if timestamp actually changed (avoid infinite loops)
+        if selected_timestamp != st.session_state.previous_timestamp:
+            st.session_state.previous_timestamp = selected_timestamp
+            
+            # JavaScript to jump video to selected timestamp
+            st.components.v1.html(f"""
+            <script>
+            // Wait a bit for the page to be ready, then jump to timestamp
+            setTimeout(() => {{
+                if (window.jumpVideoToTime) {{
+                    window.jumpVideoToTime({selected_timestamp});
+                }} else {{
+                    console.log('Video jump function not available yet');
+                }}
+            }}, 100);
+            </script>
+            """, height=0)
+        
+        # Interactive chart
         fig = go.Figure()
+        
+        # Main speed line
         fig.add_trace(go.Scatter(
             x=successful_df['timestamp'],
             y=successful_df['speed'],
             mode='lines+markers',
             name='Speed',
             line=dict(width=3, color='#1f77b4'),
-            marker=dict(size=6)
+            marker=dict(size=6),
+            hovertemplate=(
+                '<b>Time:</b> %{x:.1f}s<br>'
+                '<b>Speed:</b> %{y:.0f} km/h<br>'
+                '<extra></extra>'
+            )
         ))
         
-        fig.update_layout(
-            title="Speed vs Time",
-            xaxis_title="Time (seconds)",
-            yaxis_title="Speed (km/h)",
-            hovermode='x unified',
-            height=400
+        # Add vertical line at selected timestamp
+        fig.add_vline(
+            x=selected_timestamp,
+            line_width=3,
+            line_dash="dash",
+            line_color="red",
+            annotation_text=f"📍 {selected_timestamp:.1f}s",
+            annotation_position="top"
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        # Highlight the selected point
+        if len(successful_df) > 0:
+            closest_idx = (successful_df['timestamp'] - selected_timestamp).abs().idxmin()
+            selected_point = successful_df.loc[closest_idx]
+            
+            fig.add_trace(go.Scatter(
+                x=[selected_point['timestamp']],
+                y=[selected_point['speed']],
+                mode='markers',
+                name='Selected Point',
+                marker=dict(size=15, color='red', symbol='circle-open', line=dict(width=3)),
+                hovertemplate=(
+                    '<b>SELECTED POINT</b><br>'
+                    '<b>Time:</b> %{x:.1f}s<br>'
+                    '<b>Speed:</b> %{y:.0f} km/h<br>'
+                    '<extra></extra>'
+                )
+            ))
+        
+        fig.update_layout(
+            title="Speed vs Time - Interactive Timeline",
+            xaxis_title="Time (seconds)",
+            yaxis_title="Speed (km/h)",
+            hovermode='closest',
+            height=400,
+            showlegend=False
+        )
+        
+        st.plotly_chart(fig, use_container_width=True, key="speed_chart")
+        
+        # Show information about the selected timestamp
+        if len(successful_df) > 0:
+            closest_idx = (successful_df['timestamp'] - selected_timestamp).abs().idxmin()
+            selected_data = successful_df.loc[closest_idx]
+            
+            st.info(
+                f"🎯 **Selected Frame**: {selected_data['filename']} | "
+                f"**Time**: {selected_data['timestamp']:.1f}s | "
+                f"**Speed**: {selected_data['speed']:.0f} km/h"
+            )
     
     # Detailed results table
     st.subheader("📋 Detailed Results")
     
     # Add legend
-    st.caption("**Status Legend:** ✅ AI Read = Direct AI reading | ⚠️ Corrected = AI misread digit, corrected based on context | 🔮 Estimated = AI couldn't read, value interpolated from surrounding data | ❌ Failed = No reading available")
+    st.caption("**Status Legend:** ✅ Rule-based Read = Direct reading | ⚠️ Corrected = Misread digit corrected | 🔮 Estimated = Value interpolated from surrounding data | ❌ Failed = No reading available")
     
     # Format the dataframe for display
     display_df = df.copy()
@@ -367,7 +513,7 @@ def display_results(analysis_data):
             elif row.get('anomaly_corrected', False):
                 return '⚠️ Corrected'
             else:
-                return '✅ AI Read'
+                return '✅ Rule-based Read'
         else:
             return '❌ Failed'
     
