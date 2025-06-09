@@ -446,19 +446,26 @@ CORRECTIONS:"""
             print(f"DEBUG: AI Response length: {len(ai_response)}")
             print(f"DEBUG: AI Response preview: {ai_response[:1000]}")
             
-            # Extract JSON from AI response
-            json_match = re.search(r'\[.*\]', ai_response, re.DOTALL)
+            # Extract JSON from AI response - handle both plain JSON and markdown code blocks
+            json_match = re.search(r'```json\s*(\[.*?\])\s*```', ai_response, re.DOTALL)
             if not json_match:
-                # Try to find corrections in a different format
-                if "[]" in ai_response or "no corrections" in ai_response.lower():
-                    print("DEBUG: AI indicated no corrections needed")
-                    return corrected_results
+                # Try plain JSON without code blocks
+                json_match = re.search(r'\[.*\]', ai_response, re.DOTALL)
+                if json_match:
+                    json_text = json_match.group()
                 else:
-                    print(f"DEBUG: No JSON found in response: {ai_response}")
-                    raise ValueError("No valid JSON found in AI response")
+                    # Try to find corrections in a different format
+                    if "[]" in ai_response or "no corrections" in ai_response.lower():
+                        print("DEBUG: AI indicated no corrections needed")
+                        return corrected_results
+                    else:
+                        print(f"DEBUG: No JSON found in response: {ai_response}")
+                        raise ValueError("No valid JSON found in AI response")
+            else:
+                json_text = json_match.group(1)  # Get the content inside ```json...```
             
-            print(f"DEBUG: Found JSON: {json_match.group()}")
-            corrections = json.loads(json_match.group())
+            print(f"DEBUG: Found JSON: {json_text}")
+            corrections = json.loads(json_text)
             print(f"DEBUG: Parsed {len(corrections)} corrections")
             
             # Apply corrections
