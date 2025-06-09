@@ -523,17 +523,18 @@ CORRECTIONS:"""
                     return False
         
         return True
-
-    def get_cost_info(self) -> Dict:
+    
+    @staticmethod
+    def get_model_pricing(model_name: str) -> Dict[str, float]:
         """
-        Calculate the cost of API usage based on Gemini pricing
+        Get pricing information for a specific model
         
+        Args:
+            model_name: Name of the Gemini model
+            
         Returns:
-            Dictionary with cost breakdown
+            Dictionary with input_per_1m and output_per_1m pricing
         """
-        # Gemini pricing (as of 2024-2025)
-        # Prices per 1M tokens
-        
         pricing = {
             'gemini-1.5-flash': {
                 'input_per_1m': 0.075,
@@ -549,7 +550,59 @@ CORRECTIONS:"""
             }
         }
         
-        model_pricing = pricing.get(self.model_name, pricing['gemini-1.5-flash'])
+        return pricing.get(model_name, pricing['gemini-1.5-flash'])
+    
+    @staticmethod
+    def estimate_cost(estimated_frames: int, model_name: str, include_ai_analysis: bool = True) -> Dict[str, float]:
+        """
+        Estimate the cost of analysis for a given number of frames
+        
+        Args:
+            estimated_frames: Number of frames to analyze
+            model_name: Gemini model to use
+            include_ai_analysis: Whether to include cost of AI data analysis
+            
+        Returns:
+            Dictionary with cost breakdown
+        """
+        pricing = SpeedometerAnalyzer.get_model_pricing(model_name)
+        
+        # Estimate tokens for speedometer reading
+        estimated_input_tokens = estimated_frames * 1000  # ~1000 tokens per image
+        estimated_output_tokens = estimated_frames * 10   # ~10 tokens per response
+        
+        # Add tokens for AI data analysis if enabled
+        if include_ai_analysis:
+            # Additional tokens for analyzing the speed dataset
+            analysis_input_tokens = estimated_frames * 50  # ~50 tokens per data point in analysis
+            analysis_output_tokens = max(100, estimated_frames * 5)  # Base 100 + ~5 per potential correction
+            
+            estimated_input_tokens += analysis_input_tokens
+            estimated_output_tokens += analysis_output_tokens
+        
+        input_cost = (estimated_input_tokens / 1_000_000) * pricing['input_per_1m']
+        output_cost = (estimated_output_tokens / 1_000_000) * pricing['output_per_1m']
+        total_cost = input_cost + output_cost
+        
+        return {
+            'estimated_frames': estimated_frames,
+            'estimated_input_tokens': estimated_input_tokens,
+            'estimated_output_tokens': estimated_output_tokens,
+            'input_cost_usd': input_cost,
+            'output_cost_usd': output_cost,
+            'total_cost_usd': total_cost,
+            'model': model_name
+        }
+
+    def get_cost_info(self) -> Dict:
+        """
+        Calculate the cost of API usage based on Gemini pricing
+        
+        Returns:
+            Dictionary with cost breakdown
+        """
+        # Use centralized pricing information
+        model_pricing = self.get_model_pricing(self.model_name)
         
         input_cost = (self.total_input_tokens / 1_000_000) * model_pricing['input_per_1m']
         output_cost = (self.total_output_tokens / 1_000_000) * model_pricing['output_per_1m']

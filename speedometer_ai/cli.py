@@ -106,12 +106,14 @@ def analyze(video_path, api_key, output, fps, delay, parallel, interpolate, anom
         frame_files = extract_frames_from_video(video_path, frames_dir, fps)
         click.echo(f"   ✓ Extracted {len(frame_files)} frames")
         
-        # Cost estimation
+        # Cost estimation based on selected model
         estimated_frames = len(frame_files)
-        estimated_input_tokens = estimated_frames * 1000  # Rough estimate
-        estimated_output_tokens = estimated_frames * 10
-        estimated_cost = (estimated_input_tokens / 1_000_000) * 0.075 + (estimated_output_tokens / 1_000_000) * 0.30
-        click.echo(f"   💰 Estimated cost: ${estimated_cost:.4f} USD for {estimated_frames} frames")
+        cost_estimate = SpeedometerAnalyzer.estimate_cost(
+            estimated_frames, model, include_ai_analysis=(anomaly_detection or interpolate)
+        )
+        click.echo(f"   💰 Estimated cost: ${cost_estimate['total_cost_usd']:.4f} USD for {estimated_frames} frames ({model})")
+        if anomaly_detection or interpolate:
+            click.echo(f"      Includes AI-powered data analysis")
         
         # Step 2: Initialize analyzer
         click.echo(f"🤖 Initializing Gemini AI analyzer ({model})...")

@@ -52,7 +52,7 @@ def main():
             model = st.selectbox("Gemini Model", 
                                ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"],
                                index=0,
-                               help="Choose the Gemini model: Flash is faster/cheaper, Pro is more accurate, 2.0 is the latest experimental (⚠️ very low quota limits)")
+                               help="Choose the Gemini model:\n• Flash: Fastest & cheapest ($0.075/$0.30 per 1M tokens)\n• Pro: Most accurate but expensive ($3.50/$10.50 per 1M tokens)\n• 2.0 Experimental: Latest features, moderate cost ($0.0375/$0.15 per 1M tokens) but very low quota limits")
             
             parallel_workers = st.slider("Parallel workers", 1, 20, 10, 1, 
                                         help="Number of parallel API calls (higher = faster but more load)")
@@ -115,12 +115,15 @@ def main():
                     cap.release()
                     
                     estimated_frames = int(duration * fps)
-                    # Rough estimate: ~1000 input tokens per frame, ~10 output tokens
-                    estimated_input_tokens = estimated_frames * 1000
-                    estimated_output_tokens = estimated_frames * 10
-                    estimated_cost = (estimated_input_tokens / 1_000_000) * 0.075 + (estimated_output_tokens / 1_000_000) * 0.30
+                    # Use model-specific cost estimation
+                    cost_estimate = SpeedometerAnalyzer.estimate_cost(
+                        estimated_frames, model, include_ai_analysis=(anomaly_detection or interpolate_gaps)
+                    )
                     
-                    st.info(f"📊 **Estimated Analysis**: {estimated_frames} frames (~{duration:.1f}s video) | **Est. Cost**: ${estimated_cost:.4f} USD")
+                    cost_info = f"📊 **Estimated Analysis**: {estimated_frames} frames (~{duration:.1f}s video) | **Est. Cost**: ${cost_estimate['total_cost_usd']:.4f} USD ({model})"
+                    if anomaly_detection or interpolate_gaps:
+                        cost_info += " | Includes AI data analysis"
+                    st.info(cost_info)
                 except:
                     st.warning("⚠️ Could not estimate video duration")
             
