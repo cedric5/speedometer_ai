@@ -9,8 +9,8 @@ import pandas as pd
 from pathlib import Path
 import plotly.express as px
 import plotly.graph_objects as go
-from .core import SpeedometerAnalyzer, QuotaExceededError
-from .utils import (
+from speedometer_ai.core import SpeedometerAnalyzer, QuotaExceededError
+from speedometer_ai.utils import (
     extract_frames_from_video, 
     save_results_to_csv, 
     validate_video_file,
@@ -57,13 +57,13 @@ def main():
             parallel_workers = st.slider("Parallel workers", 1, 20, 10, 1, 
                                         help="Number of parallel API calls (higher = faster but more load)")
             
-            st.subheader("AI-Powered Data Processing")
-            anomaly_detection = st.checkbox("AI anomaly detection & correction", True,
-                                           help="Use AI to detect and correct speed misreadings (e.g., 90 read as 60)")
+            st.subheader("Rule-Based Data Processing")
+            anomaly_detection = st.checkbox("Anomaly detection & correction", True,
+                                           help="Use rule-based algorithms to detect and correct speed misreadings (e.g., OCR digit confusion)")
             max_acceleration = st.slider("Max car acceleration (km/h/s)", 5.0, 30.0, 16.95, 0.05,
-                                       help="Maximum realistic acceleration for your car - used by AI for anomaly detection")
-            interpolate_gaps = st.checkbox("AI gap filling", True,
-                                         help="Use AI to intelligently fill missing speed readings using surrounding data and physics")
+                                       help="Maximum realistic acceleration for your car - used for physics validation")
+            interpolate_gaps = st.checkbox("Gap filling & smoothing", True,
+                                         help="Use rule-based interpolation and smoothing to fill missing readings and ensure smooth speed lines")
             
             st.subheader("Output Options")
             keep_frames = st.checkbox("Keep extracted frames", False)
@@ -117,12 +117,12 @@ def main():
                     estimated_frames = int(duration * fps)
                     # Use model-specific cost estimation
                     cost_estimate = SpeedometerAnalyzer.estimate_cost(
-                        estimated_frames, model, include_ai_analysis=(anomaly_detection or interpolate_gaps)
+                        estimated_frames, model, include_ai_analysis=False
                     )
                     
                     cost_info = f"📊 **Estimated Analysis**: {estimated_frames} frames (~{duration:.1f}s video) | **Est. Cost**: ${cost_estimate['total_cost_usd']:.4f} USD ({model})"
                     if anomaly_detection or interpolate_gaps:
-                        cost_info += " | Includes AI data analysis"
+                        cost_info += " | Plus rule-based post-processing (no additional cost)"
                     st.info(cost_info)
                 except:
                     st.warning("⚠️ Could not estimate video duration")
@@ -219,19 +219,19 @@ def analyze_video(video_path: Path, api_key: str, model: str, fps: float, delay:
             raw_success_rate = len([r for r in results if r['success']]) / len(results) * 100
             
             if anomaly_detection or interpolate_gaps:
-                status_text.text("🤖 AI analyzing speed data for anomalies and gaps...")
+                status_text.text("🔧 Rule-based analyzing speed data for anomalies and gaps...")
                 try:
-                    results = analyzer.analyze_speed_data_with_ai(results, max_acceleration)
+                    results = analyzer.analyze_speed_data_with_rules(results, max_acceleration)
                 except Exception as e:
-                    st.warning(f"⚠️ AI analysis failed, falling back to rule-based methods: {e}")
-                    # Fallback to original methods if AI fails
+                    st.warning(f"⚠️ Rule-based analysis failed: {e}")
+                    # Manual fallback if the integrated method fails
                     if anomaly_detection:
-                        status_text.text("🔧 Detecting and correcting anomalies (rule-based)...")
+                        status_text.text("🔧 Detecting and correcting anomalies...")
                         from .utils import detect_and_correct_anomalies
                         results = detect_and_correct_anomalies(results, max_change_per_second=max_acceleration)
                     
                     if interpolate_gaps:
-                        status_text.text("🔧 Filling gaps using interpolation (rule-based)...")
+                        status_text.text("🔧 Filling gaps using interpolation...")
                         from .utils import interpolate_missing_speeds
                         results = interpolate_missing_speeds(results, max_gap_size=3)
             
@@ -240,15 +240,18 @@ def analyze_video(video_path: Path, api_key: str, model: str, fps: float, delay:
                 processed_success_rate = len([r for r in results if r['success']]) / len(results) * 100
                 corrected_count = len([r for r in results if r.get('anomaly_corrected', False)])
                 interpolated_count = len([r for r in results if r.get('interpolated', False)])
+                smoothed_count = len([r for r in results if r.get('smoothed', False)])
                 
                 if processed_success_rate > raw_success_rate:
                     improvement = processed_success_rate - raw_success_rate
-                    st.info(f"✨ Data processing improved success rate by {improvement:.1f}% ({raw_success_rate:.1f}% → {processed_success_rate:.1f}%)")
+                    st.info(f"✨ Rule-based processing improved success rate by {improvement:.1f}% ({raw_success_rate:.1f}% → {processed_success_rate:.1f}%)")
                 
                 if corrected_count > 0:
-                    st.success(f"⚠️ Corrected {corrected_count} anomalous AI readings")
+                    st.success(f"⚠️ Corrected {corrected_count} anomalous readings")
                 if interpolated_count > 0:
                     st.success(f"🔮 Interpolated {interpolated_count} missing values")
+                if smoothed_count > 0:
+                    st.success(f"📈 Smoothed {smoothed_count} outlier readings")
             
             # Step 5: Finalize results
             status_text.text("📊 Finalizing results...")
