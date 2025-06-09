@@ -38,13 +38,13 @@ from .utils import (
               help='Number of parallel workers (default: 10, use 1 for sequential)')
 @click.option('--interpolate/--no-interpolate', 
               default=True, 
-              help='AI-powered gap filling in speed data (default: True)')
+              help='Rule-based gap filling in speed data (default: True)')
 @click.option('--anomaly-detection/--no-anomaly-detection', 
               default=True, 
-              help='AI-powered anomaly detection and correction (default: True)')
+              help='Rule-based anomaly detection and correction (default: True)')
 @click.option('--max-acceleration', 
               default=16.95, 
-              help='Maximum car acceleration in km/h/s for AI analysis (default: 16.95 km/h/s)')
+              help='Maximum car acceleration in km/h/s for analysis (default: 16.95 km/h/s)')
 @click.option('--model', '-m',
               default='gemini-1.5-flash',
               type=click.Choice(['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-exp'], case_sensitive=False),
@@ -109,11 +109,11 @@ def analyze(video_path, api_key, output, fps, delay, parallel, interpolate, anom
         # Cost estimation based on selected model
         estimated_frames = len(frame_files)
         cost_estimate = SpeedometerAnalyzer.estimate_cost(
-            estimated_frames, model, include_ai_analysis=(anomaly_detection or interpolate)
+            estimated_frames, model, include_ai_analysis=False
         )
         click.echo(f"   💰 Estimated cost: ${cost_estimate['total_cost_usd']:.4f} USD for {estimated_frames} frames ({model})")
         if anomaly_detection or interpolate:
-            click.echo(f"      Includes AI-powered data analysis")
+            click.echo(f"      Plus rule-based post-processing (no additional cost)")
         
         # Step 2: Initialize analyzer
         click.echo(f"🤖 Initializing Gemini AI analyzer ({model})...")
@@ -178,29 +178,18 @@ def analyze(video_path, api_key, output, fps, delay, parallel, interpolate, anom
             
             sys.exit(1)
         
-        # Step 4: Post-process results with AI
+        # Step 4: Post-process results with rule-based methods
         raw_success_rate = len([r for r in results if r['success']]) / len(results) * 100
         
         if anomaly_detection or interpolate:
-            click.echo(f"🤖 AI analyzing speed data for anomalies and gaps...")
-            try:
-                results = analyzer.analyze_speed_data_with_ai(results, max_acceleration)
-            except Exception as e:
-                click.echo(f"   ⚠️ AI analysis failed, falling back to rule-based methods: {e}")
-                # Fallback to original methods if AI fails
-                if anomaly_detection:
-                    click.echo(f"🔧 Detecting and correcting anomalies (rule-based)...")
-                    results = detect_and_correct_anomalies(results, max_change_per_second=max_acceleration)
-                    
-                if interpolate:
-                    click.echo(f"🔧 Filling gaps using interpolation (rule-based)...")
-                    results = interpolate_missing_speeds(results, max_gap_size=3)
+            results = analyzer.analyze_speed_data_with_rules(results, max_acceleration)
         
         # Show improvement if processing was applied
         if anomaly_detection or interpolate:
             processed_success_rate = len([r for r in results if r['success']]) / len(results) * 100
             corrected_count = len([r for r in results if r.get('anomaly_corrected', False)])
             interpolated_count = len([r for r in results if r.get('interpolated', False)])
+            smoothed_count = len([r for r in results if r.get('smoothed', False)])
             
             if processed_success_rate > raw_success_rate:
                 improvement = processed_success_rate - raw_success_rate
@@ -210,6 +199,8 @@ def analyze(video_path, api_key, output, fps, delay, parallel, interpolate, anom
                 click.echo(f"   ✓ Corrected {corrected_count} anomalous readings")
             if interpolated_count > 0:
                 click.echo(f"   ✓ Interpolated {interpolated_count} missing values")
+            if smoothed_count > 0:
+                click.echo(f"   ✓ Smoothed {smoothed_count} outlier readings")
         
         # Step 5: Save results
         csv_path = output / "speed_results.csv"

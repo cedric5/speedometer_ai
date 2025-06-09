@@ -299,271 +299,234 @@ Speed reading:"""
         
         return stats
     
-    def analyze_speed_data_with_ai(self, results: List[Dict], max_acceleration: float = 16.95) -> List[Dict]:
+    def analyze_speed_data_with_rules(self, results: List[Dict], max_acceleration: float = 16.95) -> List[Dict]:
         """
-        Use AI to analyze and correct speed data anomalies and fill gaps
+        Use rule-based algorithms to correct speed data anomalies and fill gaps
         
         Args:
             results: List of analysis results with speed readings
             max_acceleration: Maximum realistic acceleration for the car (km/h/s)
             
         Returns:
-            AI-corrected results with anomalies fixed and gaps filled
+            Rule-corrected results with anomalies fixed and gaps filled
         """
         if not results or len(results) < 3:
             return results
-            
-        # Prepare speed data for AI analysis
-        speed_data = []
-        for i, result in enumerate(results):
-            speed_data.append({
-                'timestamp': result['timestamp'],
-                'speed': result['speed'] if result['success'] else None,
-                'filename': result['filename'],
-                'original_response': result['response']
-            })
         
-        # Create AI prompt for speed data analysis
-        prompt = self._create_speed_analysis_prompt(speed_data, max_acceleration)
+        # Count missing data before processing
+        missing_count = sum(1 for r in results if not r['success'] or r['speed'] is None)
+        total_count = len(results)
         
-        try:
-            response = self.model.generate_content(prompt)
-            response_text = response.text.strip()
-            
-            # Track API usage
-            self.api_calls += 1
-            if hasattr(response, 'usage_metadata'):
-                self.total_input_tokens += getattr(response.usage_metadata, 'prompt_token_count', 0)
-                self.total_output_tokens += getattr(response.usage_metadata, 'candidates_token_count', 0)
-            
-            # Parse AI response and apply corrections
-            corrected_results = self._parse_speed_corrections(results, response_text, max_acceleration)
-            return corrected_results
-            
-        except Exception as e:
-            # If AI analysis fails, return original results
-            print(f"Warning: AI speed analysis failed: {e}")
-            print(f"AI Response was: {response_text[:500]}...")  # Debug: show first 500 chars
-            return results
-    
-    def _create_speed_analysis_prompt(self, speed_data: List[Dict], max_acceleration: float) -> str:
-        """Create prompt for AI speed data analysis"""
+        print(f"\n🔧 Rule-based analyzing speed data for anomalies and gaps...")
+        print(f"   • Total frames: {total_count}")
+        print(f"   • Missing/unclear readings: {missing_count}")
+        print(f"   • Success rate before processing: {((total_count - missing_count) / total_count * 100):.1f}%")
+        print(f"   • Physics constraint: max {max_acceleration} km/h/s acceleration")
         
-        # Format speed data with detailed timing analysis
-        data_text = "\nSpeed readings with timing analysis:\n"
-        for i, item in enumerate(speed_data):
-            speed_str = f"{item['speed']} km/h" if item['speed'] is not None else "MISSING"
-            data_text += f"  {item['timestamp']:.2f}s: {speed_str}"
-            
-            # Add timing context for physics validation
-            if i > 0:
-                time_diff = item['timestamp'] - speed_data[i-1]['timestamp']
-                prev_speed = speed_data[i-1]['speed']
-                curr_speed = item['speed']
-                
-                if prev_speed is not None and curr_speed is not None:
-                    speed_change = abs(curr_speed - prev_speed)
-                    max_allowed_change = max_acceleration * time_diff
-                    data_text += f" (Δt={time_diff:.2f}s, Δv={speed_change:.1f}, max_allowed={max_allowed_change:.1f})"
-                    if speed_change > max_allowed_change:
-                        data_text += " ⚠️VIOLATION"
-            data_text += "\n"
+        # Import rule-based processing functions from utils
+        from .utils import detect_and_correct_anomalies, interpolate_missing_speeds
         
-        prompt = f"""
-TASK: Analyze car speedometer readings for physics violations and missing data, then provide corrections.
-
-CRITICAL PHYSICS CONSTRAINTS:
-- Maximum acceleration: {max_acceleration} km/h per second
-- For ANY two consecutive readings with time difference Δt seconds:
-  |speed_new - speed_old| MUST BE ≤ {max_acceleration} × Δt
-- Example: If readings are 0.33s apart, max speed change = {max_acceleration} × 0.33 = {max_acceleration * 0.33:.1f} km/h
-
-SPEED DATA WITH PHYSICS ANALYSIS:{data_text}
-
-STRICT ANALYSIS RULES:
-1. PHYSICS VIOLATION DETECTION:
-   - Any speed change marked with ⚠️VIOLATION is physically impossible
-   - These readings MUST be corrected to respect acceleration limits
-   - Calculate the maximum physically possible speed for each timestamp
-   - Prefer corrections that maintain realistic driving patterns
-
-2. OCR ERROR PATTERNS (common misreads):
-   - 0 ↔ 6, 8, 9 (circular shapes confused)
-   - 1 ↔ 7 (vertical lines)
-   - 2 ↔ 5, 8 (similar curves)
-   - 3 ↔ 8 (partial recognition)
-   - 5 ↔ 6, 8 (curve confusion)
-   - 6 ↔ 8, 9 (circular confusion)
-   - 8 ↔ 9 (nearly identical)
-
-3. GAP FILLING:
-   - For MISSING readings, calculate interpolated value
-   - Ensure interpolation respects acceleration limits at EVERY point
-   - Use linear interpolation but cap changes to max_acceleration × time_interval
-
-4. VALIDATION STEPS:
-   - After each correction, verify it doesn't create new physics violations
-   - Ensure 50-300 km/h range (reasonable highway speeds)
-   - Maintain smooth driving behavior where possible
-
-RESPONSE FORMAT:
-Provide corrections as JSON array. Each correction MUST include physics justification:
-{{
-  "timestamp": 12.34,
-  "action": "ANOMALY_CORRECTION" or "INTERPOLATION",
-  "original_speed": 90,
-  "corrected_speed": 60,
-  "reason": "Physics violation: 90→120 in 0.33s requires 90.9 km/h/s (exceeds {max_acceleration}). OCR likely misread 6→9. Corrected to 60 maintains realistic progression.",
-  "physics_check": "Previous: 55 km/h, Next: 65 km/h, Time gaps: 0.33s each, Max changes: ±{max_acceleration * 0.33:.1f} km/h"
-}}
-
-IMPORTANT: Every corrected speed MUST respect acceleration limits with BOTH adjacent readings.
-
-If no corrections needed, respond with: []
-
-CORRECTIONS:"""
-
-        return prompt
-    
-    def _parse_speed_corrections(self, original_results: List[Dict], ai_response: str, max_acceleration: float) -> List[Dict]:
-        """Parse AI response and apply speed corrections"""
-        import json
-        import re
+        print(f"   • Detecting and correcting anomalies...")
+        # Step 1: Detect and correct obvious anomalies (OCR misreads)
+        corrected_results = detect_and_correct_anomalies(results, max_acceleration)
         
-        corrected_results = [result.copy() for result in original_results]
+        print(f"   • Interpolating missing values...")
+        # Step 2: Interpolate missing speed readings
+        corrected_results = interpolate_missing_speeds(corrected_results, max_gap_size=5)
         
-        # Initialize flags for all results
-        for result in corrected_results:
-            if 'interpolated' not in result:
-                result['interpolated'] = False
-            if 'anomaly_corrected' not in result:
-                result['anomaly_corrected'] = False
-            if 'ai_analyzed' not in result:
-                result['ai_analyzed'] = True
+        print(f"   • Filling remaining gaps...")
+        # Step 3: Fill any remaining gaps with estimates
+        corrected_results = self._fill_remaining_gaps(corrected_results)
         
-        try:
-            # Debug: Print AI response for inspection
-            print(f"DEBUG: AI Response length: {len(ai_response)}")
-            print(f"DEBUG: AI Response preview: {ai_response[:1000]}")
-            
-            # Extract JSON from AI response - handle both plain JSON and markdown code blocks
-            json_match = re.search(r'```json\s*(\[.*?\])\s*```', ai_response, re.DOTALL)
-            if not json_match:
-                # Try plain JSON without code blocks
-                json_match = re.search(r'\[.*\]', ai_response, re.DOTALL)
-                if json_match:
-                    json_text = json_match.group()
-                else:
-                    # Try to find corrections in a different format
-                    if "[]" in ai_response or "no corrections" in ai_response.lower():
-                        print("DEBUG: AI indicated no corrections needed")
-                        return corrected_results
-                    else:
-                        print(f"DEBUG: No JSON found in response: {ai_response}")
-                        raise ValueError("No valid JSON found in AI response")
-            else:
-                json_text = json_match.group(1)  # Get the content inside ```json...```
-            
-            print(f"DEBUG: Found JSON: {json_text}")
-            corrections = json.loads(json_text)
-            print(f"DEBUG: Parsed {len(corrections)} corrections")
-            
-            # Apply corrections
-            corrections_applied = 0
-            for correction in corrections:
-                timestamp = correction.get('timestamp')
-                action = correction.get('action')
-                corrected_speed = correction.get('corrected_speed')
-                reason = correction.get('reason', 'AI correction')
-                
-                print(f"DEBUG: Processing correction - timestamp: {timestamp}, action: {action}, corrected_speed: {corrected_speed} (type: {type(corrected_speed)})")
-                
-                # Ensure corrected_speed is a number
-                if corrected_speed is None:
-                    print(f"DEBUG: Skipping correction with None speed")
-                    continue
-                
-                try:
-                    corrected_speed = float(corrected_speed)
-                except (ValueError, TypeError):
-                    print(f"DEBUG: Could not convert corrected_speed to float: {corrected_speed}")
-                    continue
-                
-                # Find the result with matching timestamp
-                for i, result in enumerate(corrected_results):
-                    if abs(result['timestamp'] - timestamp) < 0.01:  # Small tolerance for floating point
-                        original_speed = result['speed']
-                        
-                        # VALIDATE: Check if correction respects acceleration limits with adjacent readings
-                        if self._validate_speed_correction(corrected_results, i, corrected_speed, max_acceleration):
-                            corrected_results[i]['speed'] = corrected_speed
-                            corrected_results[i]['success'] = True
-                            corrections_applied += 1
-                            
-                            if action == "ANOMALY_CORRECTION":
-                                corrected_results[i]['anomaly_corrected'] = True
-                                corrected_results[i]['response'] = f"AI ANOMALY CORRECTION: Original {original_speed} km/h → {corrected_speed} km/h. {reason} | Original: {result['response']}"
-                            elif action == "INTERPOLATION":
-                                corrected_results[i]['interpolated'] = True
-                                corrected_results[i]['response'] = f"AI INTERPOLATION: Filled missing value with {corrected_speed} km/h. {reason} | Original: {result['response']}"
-                            
-                            print(f"DEBUG: Applied correction at {timestamp:.2f}s: {original_speed} → {corrected_speed}")
-                            print(f"DEBUG: Verification - result[{i}]['speed'] is now: {corrected_results[i]['speed']}")
-                        else:
-                            # AI suggestion violates physics - reject it
-                            print(f"WARNING: AI suggested correction violates acceleration limits at {timestamp:.2f}s: {original_speed} → {corrected_speed}")
-                        break
-            
-            print(f"DEBUG: Applied {corrections_applied} out of {len(corrections)} corrections")
-            
-        except Exception as e:
-            print(f"Warning: Failed to parse AI corrections: {e}")
-            # Return original results if parsing fails
-            return corrected_results
+        print(f"   • Applying final smoothing...")
+        # Step 4: Apply smoothing to ensure smooth speed line
+        corrected_results = self._apply_smoothing(corrected_results)
+        
+        # Count and report the results
+        anomaly_corrections = sum(1 for r in corrected_results if r.get('anomaly_corrected', False))
+        interpolations = sum(1 for r in corrected_results if r.get('interpolated', False))
+        smoothed = sum(1 for r in corrected_results if r.get('smoothed', False))
+        final_missing = sum(1 for r in corrected_results if not r['success'] or r['speed'] is None)
+        final_success_rate = ((len(corrected_results) - final_missing) / len(corrected_results) * 100)
+        original_success_rate = ((len(corrected_results) - missing_count) / len(corrected_results) * 100)
+        improvement = final_success_rate - original_success_rate
+        
+        print(f"\n✅ Rule-based analysis complete:")
+        print(f"   • Anomaly corrections: {anomaly_corrections}")
+        print(f"   • Gap interpolations: {interpolations}")
+        print(f"   • Smoothed outliers: {smoothed}")
+        print(f"   • Remaining missing: {final_missing}")
+        print(f"   • Final success rate: {final_success_rate:.1f}% (improved by {improvement:.1f}%)")
         
         return corrected_results
     
-    def _validate_speed_correction(self, results: List[Dict], index: int, proposed_speed: float, max_acceleration: float) -> bool:
+    
+    def _fill_remaining_gaps(self, results: List[Dict]) -> List[Dict]:
         """
-        Validate that a proposed speed correction respects acceleration limits with adjacent readings
+        Fill any remaining gaps with interpolated or estimated values
+        Ensures no empty cells in the final output
+        """
+        filled_results = [result.copy() for result in results]
+        
+        # Find all successful speed readings for reference
+        valid_speeds = []
+        valid_indices = []
+        for i, result in enumerate(filled_results):
+            if result['success'] and result['speed'] is not None:
+                valid_speeds.append(result['speed'])
+                valid_indices.append(i)
+        
+        if not valid_speeds:
+            # If no valid speeds at all, use a default highway speed
+            default_speed = 120
+            for result in filled_results:
+                if result['speed'] is None:
+                    result['speed'] = default_speed
+                    result['success'] = True
+                    result['interpolated'] = True
+                    result['response'] = f"FALLBACK ESTIMATE: No valid speeds available, used default {default_speed} km/h | Original: {result['response']}"
+            return filled_results
+        
+        # Calculate average speed for fallback
+        avg_speed = int(sum(valid_speeds) / len(valid_speeds))
+        
+        # Fill gaps by finding nearest valid readings
+        for i, result in enumerate(filled_results):
+            if result['speed'] is None:
+                # Find nearest valid speeds before and after
+                prev_speed = None
+                next_speed = None
+                
+                # Look backwards
+                for j in range(i - 1, -1, -1):
+                    if filled_results[j]['speed'] is not None:
+                        prev_speed = filled_results[j]['speed']
+                        break
+                
+                # Look forwards
+                for j in range(i + 1, len(filled_results)):
+                    if filled_results[j]['speed'] is not None:
+                        next_speed = filled_results[j]['speed']
+                        break
+                
+                # Estimate speed based on available data
+                if prev_speed is not None and next_speed is not None:
+                    # Interpolate between prev and next
+                    estimated_speed = int((prev_speed + next_speed) / 2)
+                elif prev_speed is not None:
+                    # Use previous speed
+                    estimated_speed = prev_speed
+                elif next_speed is not None:
+                    # Use next speed
+                    estimated_speed = next_speed
+                else:
+                    # Use average speed
+                    estimated_speed = avg_speed
+                
+                # Apply the estimate
+                filled_results[i]['speed'] = estimated_speed
+                filled_results[i]['success'] = True
+                filled_results[i]['interpolated'] = True
+                filled_results[i]['response'] = f"GAP FILLED: Estimated {estimated_speed} km/h based on surrounding data | Original: {result['response']}"
+        
+        return filled_results
+    
+    def _apply_smoothing(self, results: List[Dict], max_difference: float = 4.0, window_size: int = 5) -> List[Dict]:
+        """
+        Apply aggressive smoothing to ensure a very smooth speed line
+        Uses a combination of outlier detection and moving average smoothing
         
         Args:
-            results: List of current results
-            index: Index of the result being corrected
-            proposed_speed: The speed value being proposed
-            max_acceleration: Maximum allowed acceleration in km/h/s
+            results: List of analysis results
+            max_difference: Maximum allowed difference between consecutive readings (km/h)
+            window_size: Size of the smoothing window for moving average
             
         Returns:
-            True if correction is physically valid, False otherwise
+            Aggressively smoothed results
         """
-        timestamp = results[index]['timestamp']
+        smoothed_results = [result.copy() for result in results]
+        smoothed_count = 0
         
-        # Check with previous reading
-        if index > 0:
-            prev_result = results[index - 1]
-            if prev_result['success'] and prev_result['speed'] is not None:
-                time_diff = results[index]['timestamp'] - prev_result['timestamp']
-                speed_change = abs(proposed_speed - prev_result['speed'])
-                max_allowed_change = max_acceleration * time_diff
+        # Phase 1: Aggressive outlier detection and correction
+        for pass_num in range(5):  # More passes for aggressive smoothing
+            changes_made = False
+            
+            for i in range(1, len(smoothed_results) - 1):
+                current = smoothed_results[i]
+                prev_result = smoothed_results[i - 1] 
+                next_result = smoothed_results[i + 1]
                 
-                if speed_change > max_allowed_change:
-                    print(f"DEBUG: Validation failed with PREVIOUS reading - {timestamp:.2f}s: {prev_result['speed']} → {proposed_speed} in {time_diff:.2f}s = {speed_change:.1f} km/h (max: {max_allowed_change:.1f})")
-                    return False
+                # Only process if all three have valid speeds
+                if (current['speed'] is not None and 
+                    prev_result['speed'] is not None and 
+                    next_result['speed'] is not None):
+                    
+                    current_speed = current['speed']
+                    prev_speed = prev_result['speed']
+                    next_speed = next_result['speed']
+                    
+                    # More aggressive: check difference with either neighbor (not both)
+                    diff_prev = abs(current_speed - prev_speed)
+                    diff_next = abs(current_speed - next_speed)
+                    
+                    # Apply smoothing if it differs significantly from either neighbor
+                    if diff_prev > max_difference or diff_next > max_difference:
+                        # Calculate expected speed based on trend
+                        expected_speed = int((prev_speed + next_speed) / 2)
+                        
+                        # More aggressive threshold for smoothing
+                        if abs(expected_speed - current_speed) > 2:  # Lower threshold
+                            original_speed = current_speed
+                            smoothed_results[i]['speed'] = expected_speed
+                            smoothed_results[i]['smoothed'] = True
+                            
+                            # Update response to indicate smoothing
+                            original_response = current['response']
+                            smoothed_results[i]['response'] = f"SMOOTHED: Original {original_speed} km/h → {expected_speed} km/h to ensure smooth speed line | Original: {original_response}"
+                            
+                            smoothed_count += 1
+                            changes_made = True
+            
+            # Stop if no changes were made in this pass
+            if not changes_made:
+                break
         
-        # Check with next reading
-        if index < len(results) - 1:
-            next_result = results[index + 1]
-            if next_result['success'] and next_result['speed'] is not None:
-                time_diff = next_result['timestamp'] - results[index]['timestamp']
-                speed_change = abs(next_result['speed'] - proposed_speed)
-                max_allowed_change = max_acceleration * time_diff
+        # Phase 2: Moving average smoothing for extra smoothness
+        moving_avg_count = 0
+        if window_size >= 3:
+            half_window = window_size // 2
+            
+            for i in range(half_window, len(smoothed_results) - half_window):
+                current = smoothed_results[i]
                 
-                if speed_change > max_allowed_change:
-                    print(f"DEBUG: Validation failed with NEXT reading - {timestamp:.2f}s: {proposed_speed} → {next_result['speed']} in {time_diff:.2f}s = {speed_change:.1f} km/h (max: {max_allowed_change:.1f})")
-                    return False
+                if current['speed'] is not None:
+                    # Calculate moving average
+                    window_speeds = []
+                    for j in range(i - half_window, i + half_window + 1):
+                        if (j < len(smoothed_results) and 
+                            smoothed_results[j]['speed'] is not None):
+                            window_speeds.append(smoothed_results[j]['speed'])
+                    
+                    if len(window_speeds) >= 3:  # Need at least 3 points
+                        moving_avg = int(sum(window_speeds) / len(window_speeds))
+                        
+                        # Apply moving average if it smooths out variations
+                        if abs(moving_avg - current['speed']) > 2:
+                            original_speed = current['speed']
+                            smoothed_results[i]['speed'] = moving_avg
+                            smoothed_results[i]['smoothed'] = True
+                            
+                            # Update response
+                            original_response = current['response']
+                            smoothed_results[i]['response'] = f"SMOOTHED: Original {original_speed} km/h → {moving_avg} km/h (moving average) | Original: {original_response}"
+                            
+                            moving_avg_count += 1
         
-        print(f"DEBUG: Validation PASSED for {timestamp:.2f}s: {proposed_speed} km/h")
-        return True
+        total_smoothed = smoothed_count + moving_avg_count
+        if total_smoothed > 0:
+            print(f"     • Aggressively smoothed {total_smoothed} readings ({smoothed_count} outliers + {moving_avg_count} moving avg)")
+        
+        return smoothed_results
     
     @staticmethod
     def get_model_pricing(model_name: str) -> Dict[str, float]:

@@ -89,7 +89,7 @@ def save_results_to_csv(results: List[Dict], output_path: Path, cost_info: Dict 
             writer.writerow({
                 'frame': result['frame'],
                 'timestamp': round(result['timestamp'], 2),
-                'speed': result['speed'] if result['speed'] else '',
+                'speed': result['speed'] if result['speed'] is not None else '',
                 'filename': result['filename'],
                 'success': result['success'],
                 'interpolated': result.get('interpolated', False),
