@@ -337,7 +337,7 @@ Speed reading:"""
                 self.total_output_tokens += getattr(response.usage_metadata, 'candidates_token_count', 0)
             
             # Parse AI response and apply corrections
-            corrected_results = self._parse_speed_corrections(results, response_text)
+            corrected_results = self._parse_speed_corrections(results, response_text, max_acceleration)
             return corrected_results
             
         except Exception as e:
@@ -348,47 +348,75 @@ Speed reading:"""
     def _create_speed_analysis_prompt(self, speed_data: List[Dict], max_acceleration: float) -> str:
         """Create prompt for AI speed data analysis"""
         
-        # Format speed data for the prompt
-        data_text = "\nSpeed readings by timestamp:\n"
-        for item in speed_data:
+        # Format speed data with detailed timing analysis
+        data_text = "\nSpeed readings with timing analysis:\n"
+        for i, item in enumerate(speed_data):
             speed_str = f"{item['speed']} km/h" if item['speed'] is not None else "MISSING"
-            data_text += f"  {item['timestamp']:.2f}s: {speed_str}\n"
+            data_text += f"  {item['timestamp']:.2f}s: {speed_str}"
+            
+            # Add timing context for physics validation
+            if i > 0:
+                time_diff = item['timestamp'] - speed_data[i-1]['timestamp']
+                prev_speed = speed_data[i-1]['speed']
+                curr_speed = item['speed']
+                
+                if prev_speed is not None and curr_speed is not None:
+                    speed_change = abs(curr_speed - prev_speed)
+                    max_allowed_change = max_acceleration * time_diff
+                    data_text += f" (Δt={time_diff:.2f}s, Δv={speed_change:.1f}, max_allowed={max_allowed_change:.1f})"
+                    if speed_change > max_allowed_change:
+                        data_text += " ⚠️VIOLATION"
+            data_text += "\n"
         
         prompt = f"""
-TASK: Analyze car speedometer readings for anomalies and missing data, then provide corrections.
+TASK: Analyze car speedometer readings for physics violations and missing data, then provide corrections.
 
-CAR SPECIFICATIONS:
+CRITICAL PHYSICS CONSTRAINTS:
 - Maximum acceleration: {max_acceleration} km/h per second
-- This means speed changes between consecutive readings should be physically realistic
+- For ANY two consecutive readings with time difference Δt seconds:
+  |speed_new - speed_old| MUST BE ≤ {max_acceleration} × Δt
+- Example: If readings are 0.33s apart, max speed change = {max_acceleration} × 0.33 = {max_acceleration * 0.33:.1f} km/h
 
-SPEED DATA:{data_text}
+SPEED DATA WITH PHYSICS ANALYSIS:{data_text}
 
-ANALYSIS INSTRUCTIONS:
-1. ANOMALY DETECTION:
-   - Look for speed readings that are physically impossible given the car's acceleration limits
-   - Common OCR errors: 0↔6,8,9; 1↔7; 2↔5,8; 3↔8; 5↔6,8; 6↔8,9; 8↔9
-   - Flag readings where speed change exceeds realistic acceleration between timestamps
-   - Consider context from surrounding readings to identify likely misreads
+STRICT ANALYSIS RULES:
+1. PHYSICS VIOLATION DETECTION:
+   - Any speed change marked with ⚠️VIOLATION is physically impossible
+   - These readings MUST be corrected to respect acceleration limits
+   - Calculate the maximum physically possible speed for each timestamp
+   - Prefer corrections that maintain realistic driving patterns
 
-2. GAP FILLING:
-   - Identify MISSING speed readings
-   - Calculate realistic interpolated values based on surrounding data
-   - Ensure interpolated values respect acceleration constraints
+2. OCR ERROR PATTERNS (common misreads):
+   - 0 ↔ 6, 8, 9 (circular shapes confused)
+   - 1 ↔ 7 (vertical lines)
+   - 2 ↔ 5, 8 (similar curves)
+   - 3 ↔ 8 (partial recognition)
+   - 5 ↔ 6, 8 (curve confusion)
+   - 6 ↔ 8, 9 (circular confusion)
+   - 8 ↔ 9 (nearly identical)
 
-3. VALIDATION:
-   - Ensure all speed values are reasonable (typically 50-300 km/h for highway driving)
-   - Maintain smooth progression where physically possible
-   - Preserve original readings when they appear correct
+3. GAP FILLING:
+   - For MISSING readings, calculate interpolated value
+   - Ensure interpolation respects acceleration limits at EVERY point
+   - Use linear interpolation but cap changes to max_acceleration × time_interval
+
+4. VALIDATION STEPS:
+   - After each correction, verify it doesn't create new physics violations
+   - Ensure 50-300 km/h range (reasonable highway speeds)
+   - Maintain smooth driving behavior where possible
 
 RESPONSE FORMAT:
-Provide corrections as JSON array. For each correction needed, include:
+Provide corrections as JSON array. Each correction MUST include physics justification:
 {{
   "timestamp": 12.34,
   "action": "ANOMALY_CORRECTION" or "INTERPOLATION",
   "original_speed": 90,
   "corrected_speed": 60,
-  "reason": "OCR likely misread 6 as 9, surrounding context suggests 60 km/h"
+  "reason": "Physics violation: 90→120 in 0.33s requires 90.9 km/h/s (exceeds {max_acceleration}). OCR likely misread 6→9. Corrected to 60 maintains realistic progression.",
+  "physics_check": "Previous: 55 km/h, Next: 65 km/h, Time gaps: 0.33s each, Max changes: ±{max_acceleration * 0.33:.1f} km/h"
 }}
+
+IMPORTANT: Every corrected speed MUST respect acceleration limits with BOTH adjacent readings.
 
 If no corrections needed, respond with: []
 
@@ -396,7 +424,7 @@ CORRECTIONS:"""
 
         return prompt
     
-    def _parse_speed_corrections(self, original_results: List[Dict], ai_response: str) -> List[Dict]:
+    def _parse_speed_corrections(self, original_results: List[Dict], ai_response: str, max_acceleration: float) -> List[Dict]:
         """Parse AI response and apply speed corrections"""
         import json
         import re
@@ -435,15 +463,21 @@ CORRECTIONS:"""
                 for i, result in enumerate(corrected_results):
                     if abs(result['timestamp'] - timestamp) < 0.01:  # Small tolerance for floating point
                         original_speed = result['speed']
-                        corrected_results[i]['speed'] = corrected_speed
-                        corrected_results[i]['success'] = True
                         
-                        if action == "ANOMALY_CORRECTION":
-                            corrected_results[i]['anomaly_corrected'] = True
-                            corrected_results[i]['response'] = f"AI ANOMALY CORRECTION: Original {original_speed} km/h → {corrected_speed} km/h. {reason} | Original: {result['response']}"
-                        elif action == "INTERPOLATION":
-                            corrected_results[i]['interpolated'] = True
-                            corrected_results[i]['response'] = f"AI INTERPOLATION: Filled missing value with {corrected_speed} km/h. {reason} | Original: {result['response']}"
+                        # VALIDATE: Check if correction respects acceleration limits with adjacent readings
+                        if self._validate_speed_correction(corrected_results, i, corrected_speed, max_acceleration):
+                            corrected_results[i]['speed'] = corrected_speed
+                            corrected_results[i]['success'] = True
+                            
+                            if action == "ANOMALY_CORRECTION":
+                                corrected_results[i]['anomaly_corrected'] = True
+                                corrected_results[i]['response'] = f"AI ANOMALY CORRECTION: Original {original_speed} km/h → {corrected_speed} km/h. {reason} | Original: {result['response']}"
+                            elif action == "INTERPOLATION":
+                                corrected_results[i]['interpolated'] = True
+                                corrected_results[i]['response'] = f"AI INTERPOLATION: Filled missing value with {corrected_speed} km/h. {reason} | Original: {result['response']}"
+                        else:
+                            # AI suggestion violates physics - reject it
+                            print(f"Warning: AI suggested correction violates acceleration limits at {timestamp:.2f}s: {original_speed} → {corrected_speed}")
                         break
             
         except Exception as e:
@@ -452,6 +486,43 @@ CORRECTIONS:"""
             return corrected_results
         
         return corrected_results
+    
+    def _validate_speed_correction(self, results: List[Dict], index: int, proposed_speed: float, max_acceleration: float) -> bool:
+        """
+        Validate that a proposed speed correction respects acceleration limits with adjacent readings
+        
+        Args:
+            results: List of current results
+            index: Index of the result being corrected
+            proposed_speed: The speed value being proposed
+            max_acceleration: Maximum allowed acceleration in km/h/s
+            
+        Returns:
+            True if correction is physically valid, False otherwise
+        """
+        # Check with previous reading
+        if index > 0:
+            prev_result = results[index - 1]
+            if prev_result['success'] and prev_result['speed'] is not None:
+                time_diff = results[index]['timestamp'] - prev_result['timestamp']
+                speed_change = abs(proposed_speed - prev_result['speed'])
+                max_allowed_change = max_acceleration * time_diff
+                
+                if speed_change > max_allowed_change:
+                    return False
+        
+        # Check with next reading
+        if index < len(results) - 1:
+            next_result = results[index + 1]
+            if next_result['success'] and next_result['speed'] is not None:
+                time_diff = next_result['timestamp'] - results[index]['timestamp']
+                speed_change = abs(next_result['speed'] - proposed_speed)
+                max_allowed_change = max_acceleration * time_diff
+                
+                if speed_change > max_allowed_change:
+                    return False
+        
+        return True
 
     def get_cost_info(self) -> Dict:
         """
