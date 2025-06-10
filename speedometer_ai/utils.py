@@ -257,8 +257,12 @@ def interpolate_missing_speeds(results: List[Dict], max_gap_size: int = 3) -> Li
     if len(speeds) < 2:
         return interpolated_results  # Need at least 2 points to interpolate
     
-    # Find gaps and interpolate
+    # Find gaps and interpolate (NEVER interpolate the first frame)
     for i, result in enumerate(interpolated_results):
+        # Skip the first frame - it must always be the original AI reading
+        if i == 0:
+            continue
+            
         if not result['success'] or result['speed'] is None:
             # Find the gap boundaries
             gap_start, gap_end = _find_gap_boundaries(interpolated_results, i, max_gap_size)
@@ -353,7 +357,8 @@ def detect_and_correct_anomalies(results: List[Dict], max_change_per_second: flo
         if 'anomaly_corrected' not in result:
             result['anomaly_corrected'] = False
     
-    # Process each frame to detect anomalies
+    # Process each frame to detect anomalies (NEVER correct the first frame)
+    # Start from index 1 and explicitly exclude first frame from any corrections
     for i in range(1, len(corrected_results) - 1):
         current = corrected_results[i]
         prev_frame = corrected_results[i - 1]
@@ -543,3 +548,63 @@ def smooth_speed_data(results: List[Dict], window_size: int = 3) -> List[Dict]:
                     smoothed_results[speed_idx]['response'] = f"SMOOTHED: AI read {speeds[i]} km/h, adjusted to {smoothed_speed} km/h to reduce noise | Original: {original_response}"
     
     return smoothed_results
+
+
+def apply_video_crop(video_path: Path, x1: int, y1: int, x2: int, y2: int) -> Optional[Path]:
+    """
+    Crop a video to the specified rectangle using FFmpeg
+    
+    Args:
+        video_path: Path to the input video file
+        x1, y1: Top-left coordinates of crop area
+        x2, y2: Bottom-right coordinates of crop area
+        
+    Returns:
+        Path to the cropped video file, or None if cropping failed
+    """
+    try:
+        # Calculate crop dimensions
+        crop_width = x2 - x1
+        crop_height = y2 - y1
+        
+        # Ensure even dimensions for video encoding compatibility
+        if crop_width % 2 != 0:
+            crop_width -= 1
+        if crop_height % 2 != 0:
+            crop_height -= 1
+            
+        # Create output path
+        output_path = video_path.parent / f"{video_path.stem}_cropped{video_path.suffix}"
+        
+        # Build FFmpeg command for cropping
+        cmd = [
+            'ffmpeg',
+            '-y',  # Overwrite output file
+            '-i', str(video_path),  # Input video
+            '-filter:v', f'crop={crop_width}:{crop_height}:{x1}:{y1}',  # Crop filter
+            '-c:a', 'copy',  # Copy audio without re-encoding
+            '-preset', 'fast',  # Fast encoding preset
+            str(output_path)  # Output path
+        ]
+        
+        # Execute FFmpeg command
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minute timeout
+        )
+        
+        if result.returncode == 0:
+            print(f"✅ Video cropped successfully: {crop_width}x{crop_height} from ({x1},{y1})")
+            return output_path
+        else:
+            print(f"❌ FFmpeg crop failed: {result.stderr}")
+            return None
+            
+    except subprocess.TimeoutExpired:
+        print("❌ Video cropping timed out (>5 minutes)")
+        return None
+    except Exception as e:
+        print(f"❌ Video cropping error: {str(e)}")
+        return None

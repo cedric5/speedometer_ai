@@ -15,7 +15,8 @@ from speedometer_ai.utils import (
     extract_frames_from_video, 
     save_results_to_csv, 
     validate_video_file,
-    check_ffmpeg_available
+    check_ffmpeg_available,
+    apply_video_crop
 )
 
 
@@ -157,6 +158,128 @@ def main():
                 temp_video_path = Path(tmp_file.name)
             
             st.success(f"✅ Video uploaded: {uploaded_file.name}")
+            
+            # Add video cropping functionality
+            st.subheader("✂️ Video Cropping (Optional)")
+            st.caption("Crop the video to focus on the speedometer area for better accuracy and faster processing")
+            
+            crop_video = st.checkbox("Enable video cropping", False, help="Crop the video to focus on speedometer area")
+            
+            if crop_video:
+                # Get video dimensions for cropping interface
+                try:
+                    import cv2
+                    cap = cv2.VideoCapture(str(temp_video_path))
+                    ret, frame = cap.read()
+                    if ret:
+                        original_height, original_width = frame.shape[:2]
+                        cap.release()
+                        
+                        st.info(f"📐 Original video dimensions: {original_width} x {original_height} pixels")
+                        
+                        # Crop area selection
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.markdown("**Crop Area Selection**")
+                            
+                            # X coordinates
+                            crop_x1 = st.slider(
+                                "Left edge (X start)",
+                                min_value=0,
+                                max_value=original_width-1,
+                                value=0,
+                                help="Left boundary of crop area"
+                            )
+                            
+                            crop_x2 = st.slider(
+                                "Right edge (X end)",
+                                min_value=crop_x1+1,
+                                max_value=original_width,
+                                value=original_width,
+                                help="Right boundary of crop area"
+                            )
+                            
+                            # Y coordinates
+                            crop_y1 = st.slider(
+                                "Top edge (Y start)",
+                                min_value=0,
+                                max_value=original_height-1,
+                                value=0,
+                                help="Top boundary of crop area"
+                            )
+                            
+                            crop_y2 = st.slider(
+                                "Bottom edge (Y end)",
+                                min_value=crop_y1+1,
+                                max_value=original_height,
+                                value=original_height,
+                                help="Bottom boundary of crop area"
+                            )
+                            
+                            # Calculate crop dimensions
+                            crop_width = crop_x2 - crop_x1
+                            crop_height = crop_y2 - crop_y1
+                            
+                            st.success(f"🎯 Crop area: {crop_width} x {crop_height} pixels")
+                            
+                        with col2:
+                            st.markdown("**Crop Preview**")
+                            
+                            # Create a preview of the crop area
+                            if st.button("🔍 Generate Crop Preview"):
+                                # Extract a frame and show crop area
+                                cap = cv2.VideoCapture(str(temp_video_path))
+                                ret, frame = cap.read()
+                                if ret:
+                                    # Draw crop rectangle on the frame
+                                    preview_frame = frame.copy()
+                                    cv2.rectangle(preview_frame, (crop_x1, crop_y1), (crop_x2, crop_y2), (0, 255, 0), 3)
+                                    
+                                    # Save preview image
+                                    import tempfile
+                                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_preview:
+                                        cv2.imwrite(tmp_preview.name, preview_frame)
+                                        st.image(tmp_preview.name, caption="Green rectangle shows crop area", use_column_width=True)
+                                    
+                                    # Show cropped area
+                                    cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+                                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_cropped:
+                                        cv2.imwrite(tmp_cropped.name, cropped_frame)
+                                        st.image(tmp_cropped.name, caption="Cropped speedometer area", use_column_width=True)
+                                    
+                                cap.release()
+                            
+                        # Apply cropping
+                        if st.button("✂️ Apply Crop to Video", type="primary"):
+                            with st.spinner("Cropping video..."):
+                                cropped_video_path = apply_video_crop(
+                                    temp_video_path, 
+                                    crop_x1, crop_y1, crop_x2, crop_y2
+                                )
+                                
+                                if cropped_video_path:
+                                    temp_video_path = cropped_video_path  # Use cropped video for analysis
+                                    st.success(f"✅ Video cropped successfully! New dimensions: {crop_width} x {crop_height}")
+                                    
+                                    # Store crop info in session state for analysis
+                                    st.session_state.crop_applied = True
+                                    st.session_state.crop_info = {
+                                        'original_size': (original_width, original_height),
+                                        'crop_area': (crop_x1, crop_y1, crop_x2, crop_y2),
+                                        'cropped_size': (crop_width, crop_height)
+                                    }
+                                else:
+                                    st.error("❌ Failed to crop video")
+                    else:
+                        st.error("❌ Could not read video for cropping")
+                        cap.release()
+                except Exception as e:
+                    st.error(f"❌ Error setting up video cropping: {str(e)}")
+            
+            # Video display
+            st.markdown("---")
+            st.subheader("📹 Video Preview")
             
             # Create container for video with ID
             video_container = st.container()
@@ -455,9 +578,9 @@ def display_results(analysis_data):
                 min_value=0.0,
                 max_value=float(max_time),
                 value=0.0,
-                step=0.05,  # Smaller step for smoother interaction
-                format="%.1fs",
-                help="Drag the slider to jump to different timestamps in the video analysis"
+                step=0.01,  # Ultra-fine step for instant, smooth updates
+                format="%.2fs",
+                help="Drag the slider - graph updates instantly as you move it"
             )
         
         with info_col:
@@ -535,7 +658,7 @@ def display_results(analysis_data):
             line=dict(color="red", width=2, dash="dash")
         )
         
-        # Render with performance optimizations
+        # Render with maximum performance optimizations for instant updates
         st.plotly_chart(
             fig, 
             use_container_width=True, 
@@ -543,7 +666,10 @@ def display_results(analysis_data):
             config={
                 'displayModeBar': False,  # Hide toolbar for faster rendering
                 'staticPlot': False,
-                'responsive': True
+                'responsive': True,
+                'doubleClick': False,  # Disable double-click zoom for speed
+                'showTips': False,  # Disable tooltips delay
+                'displaylogo': False  # Remove plotly logo for cleaner UI
             }
         )
         

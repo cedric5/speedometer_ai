@@ -130,13 +130,13 @@ Speed reading:"""
         if any(word in cleaned for word in ['UNCLEAR', 'CANNOT', 'UNABLE', 'NOT VISIBLE']):
             return None
         
-        # Extract numbers
-        numbers = re.findall(r'\b\d{2,3}\b', cleaned)
+        # Extract numbers (1-3 digits to include all valid speeds)
+        numbers = re.findall(r'\b\d{1,3}\b', cleaned)
         
         # Filter for reasonable speeds
         for num_str in numbers:
             num = int(num_str)
-            if 50 <= num <= 300:  # Reasonable speed range
+            if 0 <= num <= 400:  # Reasonable speed range (including low speeds and high-speed driving)
                 return num
         
         return None
@@ -303,6 +303,9 @@ Speed reading:"""
         """
         Use rule-based algorithms to correct speed data anomalies and fill gaps
         
+        IMPORTANT: The first frame (index 0) is NEVER modified - it must always 
+        be the original AI reading to establish the baseline speed.
+        
         Args:
             results: List of analysis results with speed readings
             max_acceleration: Maximum realistic acceleration for the car (km/h/s)
@@ -390,8 +393,12 @@ Speed reading:"""
         # Calculate average speed for fallback
         avg_speed = int(sum(valid_speeds) / len(valid_speeds))
         
-        # Fill gaps by finding nearest valid readings
+        # Fill gaps by finding nearest valid readings (NEVER fill the first frame)
         for i, result in enumerate(filled_results):
+            # Skip the first frame - it must always be the original AI reading
+            if i == 0:
+                continue
+                
             if result['speed'] is None:
                 # Find nearest valid speeds before and after
                 prev_speed = None
@@ -451,6 +458,7 @@ Speed reading:"""
         for pass_num in range(5):  # More passes for aggressive smoothing
             changes_made = False
             
+            # Process frames from index 1 to n-2 (NEVER smooth the first frame)
             for i in range(1, len(smoothed_results) - 1):
                 current = smoothed_results[i]
                 prev_result = smoothed_results[i - 1] 
@@ -496,7 +504,8 @@ Speed reading:"""
         if window_size >= 3:
             half_window = window_size // 2
             
-            for i in range(half_window, len(smoothed_results) - half_window):
+            # Moving average from half_window to end-half_window (protects first frame)
+            for i in range(max(1, half_window), len(smoothed_results) - half_window):
                 current = smoothed_results[i]
                 
                 if current['speed'] is not None:
