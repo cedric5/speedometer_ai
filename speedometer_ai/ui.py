@@ -7,6 +7,7 @@ import streamlit.components.v1
 import os
 import tempfile
 import pandas as pd
+import json
 from pathlib import Path
 import plotly.express as px
 import plotly.graph_objects as go
@@ -18,6 +19,294 @@ from speedometer_ai.utils import (
     check_ffmpeg_available,
     apply_video_crop
 )
+
+
+def load_secrets():
+    """Load API keys from secrets.json file"""
+    secrets_file = Path(__file__).parent.parent / "secrets.json"
+    if secrets_file.exists():
+        try:
+            with open(secrets_file, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            st.error(f"Error loading secrets.json: {e}")
+            return {}
+    return {}
+
+
+def get_api_key_from_sources():
+    """Get API key from secrets file, environment variable, or session state"""
+    # First try secrets file
+    secrets = load_secrets()
+    if secrets.get('gemini_api_key'):
+        return secrets['gemini_api_key']
+    
+    # Then try environment variable
+    env_key = os.getenv('GEMINI_API_KEY', '')
+    if env_key:
+        return env_key
+    
+    # Finally try session state
+    return st.session_state.get('persistent_api_key', '')
+
+
+def render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_detection, max_acceleration, interpolate_gaps, keep_frames, verbose):
+    """Render the upload section with all upload and cropping functionality"""
+    
+    has_results = 'analysis_results' in st.session_state
+    
+    if has_results:
+        # Show compact summary when in expander
+        results_data = st.session_state.analysis_results
+        video_name = results_data.get('video_name', 'Unknown')
+        st.caption(f"✅ Analyzed: {video_name}")
+    
+    uploaded_file = st.file_uploader(
+        "Choose a dashboard video file",
+        type=['mp4', 'avi', 'mov', 'mkv'],
+        help="Upload a video showing your car's dashboard",
+        key="video_upload"
+    )
+    
+    if uploaded_file is not None:
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
+            tmp_file.write(uploaded_file.read())
+            temp_video_path = Path(tmp_file.name)
+        
+        st.success(f"✅ Video uploaded: {uploaded_file.name}")
+        
+        # Two-column layout for cropping controls and preview
+        crop_col1, crop_col2 = st.columns([1, 1])
+        
+        with crop_col1:
+            # Add video cropping functionality
+            st.subheader("✂️ Video Cropping (Optional)")
+            st.caption("Crop the video to focus on the speedometer area for better accuracy and faster processing")
+            
+            crop_video = st.checkbox("Enable video cropping", False, help="Crop the video to focus on speedometer area")
+            
+            if crop_video:
+                # Get video dimensions for cropping interface
+                try:
+                    import cv2
+                    cap = cv2.VideoCapture(str(temp_video_path))
+                    ret, frame = cap.read()
+                    if ret:
+                        original_height, original_width = frame.shape[:2]
+                        cap.release()
+                        
+                        st.info(f"📐 Original video dimensions: {original_width} x {original_height} pixels")
+                        
+                        st.markdown("**Crop Area Selection**")
+                        
+                        # X coordinates
+                        crop_x1 = st.slider(
+                            "Left edge (X start)",
+                            min_value=0,
+                            max_value=original_width-1,
+                            value=0,
+                            help="Left boundary of crop area"
+                        )
+                        
+                        crop_x2 = st.slider(
+                            "Right edge (X end)",
+                            min_value=crop_x1+1,
+                            max_value=original_width,
+                            value=original_width,
+                            help="Right boundary of crop area"
+                        )
+                        
+                        # Y coordinates
+                        crop_y1 = st.slider(
+                            "Top edge (Y start)",
+                            min_value=0,
+                            max_value=original_height-1,
+                            value=0,
+                            help="Top boundary of crop area"
+                        )
+                        
+                        crop_y2 = st.slider(
+                            "Bottom edge (Y end)",
+                            min_value=crop_y1+1,
+                            max_value=original_height,
+                            value=original_height,
+                            help="Bottom boundary of crop area"
+                        )
+                        
+                        # Calculate crop dimensions
+                        crop_width = crop_x2 - crop_x1
+                        crop_height = crop_y2 - crop_y1
+                        
+                        st.success(f"🎯 Crop area: {crop_width} x {crop_height} pixels")
+                        
+                        # Apply cropping
+                        if st.button("✂️ Apply Crop to Video", type="primary"):
+                            with st.spinner("Cropping video..."):
+                                cropped_video_path = apply_video_crop(
+                                    temp_video_path, 
+                                    crop_x1, crop_y1, crop_x2, crop_y2
+                                )
+                                
+                                if cropped_video_path:
+                                    temp_video_path = cropped_video_path  # Use cropped video for analysis
+                                    st.success(f"✅ Video cropped successfully! New dimensions: {crop_width} x {crop_height}")
+                                    
+                                    # Store crop info and cropped video path in session state
+                                    st.session_state.crop_applied = True
+                                    st.session_state.cropped_video_path = str(cropped_video_path)
+                                    st.session_state.crop_info = {
+                                        'original_size': (original_width, original_height),
+                                        'crop_area': (crop_x1, crop_y1, crop_x2, crop_y2),
+                                        'cropped_size': (crop_width, crop_height)
+                                    }
+                                    st.rerun()  # Refresh to show cropped video in preview
+                                else:
+                                    st.error("❌ Failed to crop video")
+                    else:
+                        st.error("❌ Could not read video for cropping")
+                        cap.release()
+                except Exception as e:
+                    st.error(f"❌ Error setting up video cropping: {str(e)}")
+        
+        with crop_col2:
+            if crop_video:
+                st.markdown("**Crop Area Visualization**")
+                
+                # Show crop rectangle on original frame
+                try:
+                    import cv2
+                    cap = cv2.VideoCapture(str(temp_video_path))
+                    ret, frame = cap.read()
+                    if ret:
+                        # Draw crop rectangle on the frame
+                        preview_frame = frame.copy()
+                        cv2.rectangle(preview_frame, (crop_x1, crop_y1), (crop_x2, crop_y2), (0, 255, 0), 3)
+                        
+                        # Save preview image
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_preview:
+                            cv2.imwrite(tmp_preview.name, preview_frame)
+                            st.image(tmp_preview.name, caption="Green rectangle shows crop area", use_container_width=True)
+                        
+                    cap.release()
+                except:
+                    pass
+            else:
+                st.info("📝 Enable cropping to see crop area visualization")
+        
+        # Video preview section
+        st.markdown("---")
+        
+        # Create two columns for video preview and crop preview side by side
+        video_col1, video_col2 = st.columns([1, 1])
+        
+        with video_col1:
+            st.subheader("📹 Video Preview")
+            # Show cropped video if available, otherwise show original
+            if st.session_state.get('crop_applied', False) and 'cropped_video_path' in st.session_state:
+                st.caption("🎬 Showing cropped video")
+                with open(st.session_state.cropped_video_path, 'rb') as video_file:
+                    st.video(video_file.read(), start_time=0)
+            else:
+                st.caption("🎬 Showing original video")
+                st.video(uploaded_file, start_time=0)
+        
+        with video_col2:
+            if crop_video and 'original_width' in locals():
+                st.subheader("🖼️ Live Crop Preview")
+                try:
+                    import cv2
+                    cap = cv2.VideoCapture(str(temp_video_path))
+                    ret, frame = cap.read()
+                    if ret:
+                        # Show cropped area at larger size
+                        cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_cropped:
+                            cv2.imwrite(tmp_cropped.name, cropped_frame)
+                            st.image(tmp_cropped.name, caption="This area will be analyzed", use_container_width=True)
+                    cap.release()
+                except:
+                    pass
+            else:
+                st.info("Enable video cropping to see live preview here")
+            
+        # Add JavaScript to enable video time control
+        st.components.v1.html("""
+        <script>
+        // Function to jump video to specific timestamp
+        function jumpVideoToTime(timestamp) {
+            // Find the video element in Streamlit
+            const videos = document.querySelectorAll('video');
+            if (videos.length > 0) {
+                const video = videos[0]; // Get the first (main) video element
+                if (video) {
+                    video.currentTime = timestamp;
+                    console.log('Video jumped to:', timestamp, 'seconds');
+                    
+                    // Optional: Show visual feedback
+                    video.style.border = '3px solid #ff4444';
+                    setTimeout(() => {
+                        video.style.border = 'none';
+                    }, 1000);
+                }
+            } else {
+                console.log('No video element found');
+            }
+        }
+        
+        // Make function globally available
+        window.jumpVideoToTime = jumpVideoToTime;
+        
+        // Also provide alternative names for compatibility
+        window.jumpToTime = jumpVideoToTime;
+        
+        console.log('Video control functions loaded');
+        </script>
+        """, height=0)
+        
+        # Validation
+        if not validate_video_file(temp_video_path):
+            st.error("❌ Invalid video file")
+            return
+        
+        if not check_ffmpeg_available():
+            st.error("❌ FFmpeg not found. Please install FFmpeg.")
+            return
+        
+        if not api_key:
+            st.error("❌ Please enter your Gemini API key in the sidebar")
+            return
+        
+        # Cost estimation
+        if uploaded_file is not None:
+            # Estimate video duration and frames using appropriate video source
+            try:
+                import cv2
+                video_for_estimation = Path(st.session_state.cropped_video_path) if st.session_state.get('crop_applied', False) and 'cropped_video_path' in st.session_state else temp_video_path
+                cap = cv2.VideoCapture(str(video_for_estimation))
+                frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                video_fps = cap.get(cv2.CAP_PROP_FPS)
+                duration = frame_count / video_fps if video_fps > 0 else 0
+                cap.release()
+                
+                estimated_frames = int(duration * fps)
+                # Use model-specific cost estimation
+                cost_estimate = SpeedometerAnalyzer.estimate_cost(
+                    estimated_frames, model, include_ai_analysis=False
+                )
+                
+                cost_info = f"📊 **Estimated Analysis**: {estimated_frames} frames (~{duration:.1f}s video) | **Est. Cost**: ${cost_estimate['total_cost_usd']:.4f} USD ({model})"
+                if anomaly_detection or interpolate_gaps:
+                    cost_info += " | Plus rule-based post-processing (no additional cost)"
+                st.info(cost_info)
+            except:
+                st.warning("⚠️ Could not estimate video duration")
+        
+        # Analysis button
+        if st.button("🔍 Analyze Video", type="primary", use_container_width=True):
+            # Use cropped video for analysis if available
+            video_to_analyze = Path(st.session_state.cropped_video_path) if st.session_state.get('crop_applied', False) and 'cropped_video_path' in st.session_state else temp_video_path
+            analyze_video(video_to_analyze, api_key, model, fps, delay, parallel_workers, anomaly_detection, max_acceleration, interpolate_gaps, keep_frames, verbose)
 
 
 def main():
@@ -35,17 +324,17 @@ def main():
     with st.sidebar:
         st.header("Configuration")
         
-        # API Key input with session persistence
-        # Initialize from environment variable
+        # API Key input with multiple sources
+        # Initialize from multiple sources: secrets file > environment > session state
         if 'persistent_api_key' not in st.session_state:
-            st.session_state.persistent_api_key = os.getenv('GEMINI_API_KEY', '')
+            st.session_state.persistent_api_key = get_api_key_from_sources()
         
         # API Key input
         api_key = st.text_input(
             "Gemini API Key", 
             type="password",
             value=st.session_state.persistent_api_key,
-            help="Enter your Google Gemini API key (persists during browser session)",
+            help="API key sources (in priority order):\n1. secrets.json file\n2. GEMINI_API_KEY environment variable\n3. Manual input (persists during session)",
             key="gemini_api_key"
         )
         
@@ -53,11 +342,19 @@ def main():
         if api_key != st.session_state.persistent_api_key:
             st.session_state.persistent_api_key = api_key
         
-        # Show status about API key storage
+        # Show status about API key storage with source info
+        secrets = load_secrets()
+        env_key = os.getenv('GEMINI_API_KEY', '')
+        
         if api_key:
-            st.success("🔑 API key is set (persists during session)")
+            if secrets.get('gemini_api_key') and api_key == secrets['gemini_api_key']:
+                st.success("🔑 API key loaded from secrets.json")
+            elif env_key and api_key == env_key:
+                st.success("🔑 API key loaded from environment variable")
+            else:
+                st.success("🔑 API key set manually (persists during session)")
         else:
-            st.info("💡 Enter your API key above - it will be saved for this session")
+            st.info("💡 API key sources:\n• Create secrets.json file (recommended)\n• Set GEMINI_API_KEY environment variable\n• Enter manually above")
         
         # Analysis settings
         st.subheader("Analysis Settings")
@@ -87,235 +384,35 @@ def main():
             keep_frames = st.checkbox("Keep extracted frames", False)
             verbose = st.checkbox("Verbose output", False)
     
-    # Main content area
-    col1, col2 = st.columns([1, 1])
+    # Main content area - upload section (collapsible when results are ready)
+    has_results = 'analysis_results' in st.session_state
     
-    with col1:
+    # Show upload section in an expander if results exist, otherwise show normally
+    if has_results:
+        with st.expander("📹 Video Upload & Configuration", expanded=False):
+            render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_detection, max_acceleration, interpolate_gaps, keep_frames, verbose)
+    else:
         st.header("📹 Video Upload")
-        
-        uploaded_file = st.file_uploader(
-            "Choose a dashboard video file",
-            type=['mp4', 'avi', 'mov', 'mkv'],
-            help="Upload a video showing your car's dashboard"
-        )
-        
-        if uploaded_file is not None:
-            # Save uploaded file temporarily
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
-                tmp_file.write(uploaded_file.read())
-                temp_video_path = Path(tmp_file.name)
-            
-            st.success(f"✅ Video uploaded: {uploaded_file.name}")
-            
-            # Add video cropping functionality
-            st.subheader("✂️ Video Cropping (Optional)")
-            st.caption("Crop the video to focus on the speedometer area for better accuracy and faster processing")
-            
-            crop_video = st.checkbox("Enable video cropping", False, help="Crop the video to focus on speedometer area")
-            
-            if crop_video:
-                # Get video dimensions for cropping interface
-                try:
-                    import cv2
-                    cap = cv2.VideoCapture(str(temp_video_path))
-                    ret, frame = cap.read()
-                    if ret:
-                        original_height, original_width = frame.shape[:2]
-                        cap.release()
-                        
-                        st.info(f"📐 Original video dimensions: {original_width} x {original_height} pixels")
-                        
-                        # Crop area selection
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            st.markdown("**Crop Area Selection**")
-                            
-                            # X coordinates
-                            crop_x1 = st.slider(
-                                "Left edge (X start)",
-                                min_value=0,
-                                max_value=original_width-1,
-                                value=0,
-                                help="Left boundary of crop area"
-                            )
-                            
-                            crop_x2 = st.slider(
-                                "Right edge (X end)",
-                                min_value=crop_x1+1,
-                                max_value=original_width,
-                                value=original_width,
-                                help="Right boundary of crop area"
-                            )
-                            
-                            # Y coordinates
-                            crop_y1 = st.slider(
-                                "Top edge (Y start)",
-                                min_value=0,
-                                max_value=original_height-1,
-                                value=0,
-                                help="Top boundary of crop area"
-                            )
-                            
-                            crop_y2 = st.slider(
-                                "Bottom edge (Y end)",
-                                min_value=crop_y1+1,
-                                max_value=original_height,
-                                value=original_height,
-                                help="Bottom boundary of crop area"
-                            )
-                            
-                            # Calculate crop dimensions
-                            crop_width = crop_x2 - crop_x1
-                            crop_height = crop_y2 - crop_y1
-                            
-                            st.success(f"🎯 Crop area: {crop_width} x {crop_height} pixels")
-                            
-                        with col2:
-                            st.markdown("**Crop Preview**")
-                            
-                            # Create a preview of the crop area
-                            if st.button("🔍 Generate Crop Preview"):
-                                # Extract a frame and show crop area
-                                cap = cv2.VideoCapture(str(temp_video_path))
-                                ret, frame = cap.read()
-                                if ret:
-                                    # Draw crop rectangle on the frame
-                                    preview_frame = frame.copy()
-                                    cv2.rectangle(preview_frame, (crop_x1, crop_y1), (crop_x2, crop_y2), (0, 255, 0), 3)
-                                    
-                                    # Save preview image
-                                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_preview:
-                                        cv2.imwrite(tmp_preview.name, preview_frame)
-                                        st.image(tmp_preview.name, caption="Green rectangle shows crop area", use_column_width=True)
-                                    
-                                    # Show cropped area
-                                    cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
-                                    with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_cropped:
-                                        cv2.imwrite(tmp_cropped.name, cropped_frame)
-                                        st.image(tmp_cropped.name, caption="Cropped speedometer area", use_column_width=True)
-                                    
-                                cap.release()
-                            
-                        # Apply cropping
-                        if st.button("✂️ Apply Crop to Video", type="primary"):
-                            with st.spinner("Cropping video..."):
-                                cropped_video_path = apply_video_crop(
-                                    temp_video_path, 
-                                    crop_x1, crop_y1, crop_x2, crop_y2
-                                )
-                                
-                                if cropped_video_path:
-                                    temp_video_path = cropped_video_path  # Use cropped video for analysis
-                                    st.success(f"✅ Video cropped successfully! New dimensions: {crop_width} x {crop_height}")
-                                    
-                                    # Store crop info in session state for analysis
-                                    st.session_state.crop_applied = True
-                                    st.session_state.crop_info = {
-                                        'original_size': (original_width, original_height),
-                                        'crop_area': (crop_x1, crop_y1, crop_x2, crop_y2),
-                                        'cropped_size': (crop_width, crop_height)
-                                    }
-                                else:
-                                    st.error("❌ Failed to crop video")
-                    else:
-                        st.error("❌ Could not read video for cropping")
-                        cap.release()
-                except Exception as e:
-                    st.error(f"❌ Error setting up video cropping: {str(e)}")
-            
-            # Video display
-            st.markdown("---")
-            st.subheader("📹 Video Preview")
-            
-            # Create container for video with ID
-            video_container = st.container()
-            with video_container:
-                st.video(uploaded_file, start_time=0)
-                
-            # Add JavaScript to enable video time control
-            st.components.v1.html("""
-            <script>
-            // Function to jump video to specific timestamp
-            function jumpVideoToTime(timestamp) {
-                // Find the video element in Streamlit
-                const videos = document.querySelectorAll('video');
-                if (videos.length > 0) {
-                    const video = videos[0]; // Get the first (main) video element
-                    if (video) {
-                        video.currentTime = timestamp;
-                        console.log('Video jumped to:', timestamp, 'seconds');
-                        
-                        // Optional: Show visual feedback
-                        video.style.border = '3px solid #ff4444';
-                        setTimeout(() => {
-                            video.style.border = 'none';
-                        }, 1000);
-                    }
-                } else {
-                    console.log('No video element found');
-                }
-            }
-            
-            // Make function globally available
-            window.jumpVideoToTime = jumpVideoToTime;
-            
-            // Also provide alternative names for compatibility
-            window.jumpToTime = jumpVideoToTime;
-            
-            console.log('Video control functions loaded');
-            </script>
-            """, height=0)
-            
-            # Validation
-            if not validate_video_file(temp_video_path):
-                st.error("❌ Invalid video file")
-                return
-            
-            if not check_ffmpeg_available():
-                st.error("❌ FFmpeg not found. Please install FFmpeg.")
-                return
-            
-            if not api_key:
-                st.error("❌ Please enter your Gemini API key in the sidebar")
-                return
-            
-            # Cost estimation
-            if uploaded_file is not None:
-                # Estimate video duration and frames
-                try:
-                    import cv2
-                    cap = cv2.VideoCapture(str(temp_video_path))
-                    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                    video_fps = cap.get(cv2.CAP_PROP_FPS)
-                    duration = frame_count / video_fps if video_fps > 0 else 0
-                    cap.release()
-                    
-                    estimated_frames = int(duration * fps)
-                    # Use model-specific cost estimation
-                    cost_estimate = SpeedometerAnalyzer.estimate_cost(
-                        estimated_frames, model, include_ai_analysis=False
-                    )
-                    
-                    cost_info = f"📊 **Estimated Analysis**: {estimated_frames} frames (~{duration:.1f}s video) | **Est. Cost**: ${cost_estimate['total_cost_usd']:.4f} USD ({model})"
-                    if anomaly_detection or interpolate_gaps:
-                        cost_info += " | Plus rule-based post-processing (no additional cost)"
-                    st.info(cost_info)
-                except:
-                    st.warning("⚠️ Could not estimate video duration")
-            
-            # Analysis button
-            if st.button("🔍 Analyze Video", type="primary", use_container_width=True):
-                analyze_video(temp_video_path, api_key, model, fps, delay, parallel_workers, anomaly_detection, max_acceleration, interpolate_gaps, keep_frames, verbose)
+        render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_detection, max_acceleration, interpolate_gaps, keep_frames, verbose)
+
+    # Show a "New Analysis" button when results are available
+    if has_results:
+        st.markdown("---")
+        if st.button("🔄 Start New Analysis", type="secondary", use_container_width=True):
+            # Clear results to show upload section again
+            if 'analysis_results' in st.session_state:
+                del st.session_state.analysis_results
+            st.rerun()
+
+    # Results section
+    st.markdown("---")
+    st.header("📊 Results")
     
-    with col2:
-        st.header("📊 Results")
-        
-        # Check for existing results
-        if 'analysis_results' in st.session_state:
-            display_results(st.session_state.analysis_results)
-        else:
-            st.info("Upload a video and click 'Analyze Video' to see results here")
+    # Check for existing results
+    if 'analysis_results' in st.session_state:
+        display_results(st.session_state.analysis_results)
+    else:
+        st.info("Upload a video and click 'Analyze Video' to see results here")
 
 
 def analyze_video(video_path: Path, api_key: str, model: str, fps: float, delay: float, parallel_workers: int, anomaly_detection: bool, max_acceleration: float, interpolate_gaps: bool, keep_frames: bool, verbose: bool):
@@ -470,13 +567,25 @@ def display_results(analysis_data):
     video_name = analysis_data['video_name']
     video_path = analysis_data.get('video_path', None)
     
-    # Summary metrics
-    col1, col2, col3, col4, col5 = st.columns(5)
+    # Summary metrics - displayed in a simple grid without nested columns
+    st.subheader("📊 Summary Statistics")
+    
+    # Create metrics in rows instead of columns to avoid nesting issues
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.metric("Total Frames", stats.get('total_frames', 0))
     
     with col2:
+        st.metric("Duration", f"{stats.get('duration', 0):.1f}s")
+    
+    with col3:
+        if 'min_speed' in stats:
+            st.metric("Speed Range", f"{stats['min_speed']}-{stats['max_speed']} km/h")
+        else:
+            st.metric("Speed Range", "N/A")
+    
+    with col4:
         success_rate = stats.get('success_rate', 0)
         # Calculate breakdown
         ai_readings = len([r for r in results if r['success'] and not r.get('interpolated', False) and not r.get('anomaly_corrected', False)])
@@ -486,20 +595,9 @@ def display_results(analysis_data):
         st.metric("Success Rate", f"{success_rate:.1f}%", 
                  help=f"AI: {ai_readings}, Anomaly Corrected: {anomaly_corrected_count}, Interpolated: {interpolated_count}")
     
-    with col3:
-        if 'min_speed' in stats:
-            st.metric("Speed Range", f"{stats['min_speed']}-{stats['max_speed']} km/h")
-        else:
-            st.metric("Speed Range", "N/A")
-    
-    with col4:
-        st.metric("Duration", f"{stats.get('duration', 0):.1f}s")
-    
-    with col5:
-        if cost_info.get('total_cost_usd', 0) > 0:
-            st.metric("Cost", f"${cost_info['total_cost_usd']:.4f}")
-        else:
-            st.metric("Cost", "<$0.0001")
+    # Cost information in a separate row
+    if cost_info.get('total_cost_usd', 0) > 0:
+        st.metric("Analysis Cost", f"${cost_info['total_cost_usd']:.4f}")
     
     # Create DataFrame for display
     df = pd.DataFrame(results)
@@ -516,26 +614,22 @@ def display_results(analysis_data):
         
         max_time = successful_df['timestamp'].max() if len(successful_df) > 0 else 10.0
         
-        # Create columns for slider and current selection display
-        slider_col, info_col = st.columns([3, 1])
+        # Timestamp selection
+        selected_timestamp = st.slider(
+            "Select timestamp to view:",
+            min_value=0.0,
+            max_value=float(max_time),
+            value=0.0,
+            step=0.01,  # Ultra-fine step for instant, smooth updates
+            format="%.2fs",
+            help="Drag the slider - graph updates instantly as you move it"
+        )
         
-        with slider_col:
-            selected_timestamp = st.slider(
-                "Select timestamp to view:",
-                min_value=0.0,
-                max_value=float(max_time),
-                value=0.0,
-                step=0.01,  # Ultra-fine step for instant, smooth updates
-                format="%.2fs",
-                help="Drag the slider - graph updates instantly as you move it"
-            )
-        
-        with info_col:
-            # Find the closest data point to the selected timestamp
-            if len(successful_df) > 0:
-                closest_idx = (successful_df['timestamp'] - selected_timestamp).abs().idxmin()
-                closest_speed = successful_df.loc[closest_idx, 'speed']
-                st.metric("Speed at Time", f"{closest_speed:.0f} km/h", f"{selected_timestamp:.1f}s")
+        # Show current selection info
+        if len(successful_df) > 0:
+            closest_idx = (successful_df['timestamp'] - selected_timestamp).abs().idxmin()
+            closest_speed = successful_df.loc[closest_idx, 'speed']
+            st.info(f"**Selected Time**: {selected_timestamp:.1f}s | **Speed**: {closest_speed:.0f} km/h")
         
         # Video jumping functionality temporarily disabled for performance
         # Will be re-implemented later with a more efficient approach
@@ -664,19 +758,11 @@ def display_results(analysis_data):
     # Cost breakdown section
     if cost_info:
         st.subheader("💰 Cost Breakdown")
-        cost_col1, cost_col2, cost_col3 = st.columns(3)
         
-        with cost_col1:
-            st.metric("API Calls", cost_info.get('api_calls', 0))
-            st.metric("Model", cost_info.get('model', 'N/A'))
-        
-        with cost_col2:
-            st.metric("Input Tokens", f"{cost_info.get('input_tokens', 0):,}")
-            st.metric("Output Tokens", f"{cost_info.get('output_tokens', 0):,}")
-        
-        with cost_col3:
-            st.metric("Input Cost", f"${cost_info.get('input_cost_usd', 0):.6f}")
-            st.metric("Output Cost", f"${cost_info.get('output_cost_usd', 0):.6f}")
+        # Display cost metrics in a simple layout
+        st.text(f"Model: {cost_info.get('model', 'N/A')} | API Calls: {cost_info.get('api_calls', 0)}")
+        st.text(f"Input Tokens: {cost_info.get('input_tokens', 0):,} | Output Tokens: {cost_info.get('output_tokens', 0):,}")
+        st.text(f"Input Cost: ${cost_info.get('input_cost_usd', 0):.6f} | Output Cost: ${cost_info.get('output_cost_usd', 0):.6f}")
         
         if cost_info.get('total_cost_usd', 0) < 0.01:
             st.success("💡 Very affordable! Less than 1 cent.")
@@ -688,27 +774,23 @@ def display_results(analysis_data):
     # Download section
     st.subheader("💾 Download Results")
     
-    col1, col2 = st.columns(2)
+    # CSV download
+    csv_data = df.to_csv(index=False)
+    st.download_button(
+        label="📄 Download CSV",
+        data=csv_data,
+        file_name=f"{Path(video_name).stem}_speed_analysis.csv",
+        mime="text/csv"
+    )
     
-    with col1:
-        # CSV download
-        csv_data = df.to_csv(index=False)
-        st.download_button(
-            label="📄 Download CSV",
-            data=csv_data,
-            file_name=f"{Path(video_name).stem}_speed_analysis.csv",
-            mime="text/csv"
-        )
-    
-    with col2:
-        # Summary report
-        report = generate_summary_report(results, stats, video_name, cost_info)
-        st.download_button(
-            label="📊 Download Report",
-            data=report,
-            file_name=f"{Path(video_name).stem}_analysis_report.txt",
-            mime="text/plain"
-        )
+    # Summary report
+    report = generate_summary_report(results, stats, video_name, cost_info)
+    st.download_button(
+        label="📊 Download Report",
+        data=report,
+        file_name=f"{Path(video_name).stem}_analysis_report.txt",
+        mime="text/plain"
+    )
 
 
 def generate_summary_report(results, stats, video_name, cost_info=None):
