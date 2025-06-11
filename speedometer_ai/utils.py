@@ -9,6 +9,7 @@ import numpy as np
 from pathlib import Path
 from typing import List, Dict, Optional
 import pandas as pd
+from datetime import datetime
 
 
 def extract_frames_from_video(video_path: Path, 
@@ -550,7 +551,7 @@ def smooth_speed_data(results: List[Dict], window_size: int = 3) -> List[Dict]:
     return smoothed_results
 
 
-def apply_video_crop(video_path: Path, x1: int, y1: int, x2: int, y2: int) -> Optional[Path]:
+def apply_video_crop(video_path: Path, x1: int, y1: int, x2: int, y2: int, progress_callback=None) -> Optional[Path]:
     """
     Crop a video to the specified rectangle using FFmpeg
     
@@ -576,35 +577,765 @@ def apply_video_crop(video_path: Path, x1: int, y1: int, x2: int, y2: int) -> Op
         # Create output path
         output_path = video_path.parent / f"{video_path.stem}_cropped{video_path.suffix}"
         
-        # Build FFmpeg command for cropping
-        cmd = [
+        # Try hardware acceleration first, fallback to software
+        hw_cmd = [
+            'ffmpeg',
+            '-y',  # Overwrite output file
+            '-hwaccel', 'videotoolbox',  # M2 hardware acceleration
+            '-i', str(video_path),  # Input video
+            '-filter:v', f'crop={crop_width}:{crop_height}:{x1}:{y1}',  # Crop filter
+            '-c:v', 'h264_videotoolbox',  # M2 hardware encoder
+            '-b:v', '5M',  # Target bitrate
+            '-q:v', '50',  # Quality setting
+            '-c:a', 'copy',  # Copy audio without re-encoding
+            str(output_path)  # Output path
+        ]
+        
+        # Fallback software command
+        sw_cmd = [
             'ffmpeg',
             '-y',  # Overwrite output file
             '-i', str(video_path),  # Input video
             '-filter:v', f'crop={crop_width}:{crop_height}:{x1}:{y1}',  # Crop filter
+            '-c:v', 'libx264',  # Software encoder
+            '-preset', 'fast',  # Fast preset
+            '-crf', '23',  # Good quality
             '-c:a', 'copy',  # Copy audio without re-encoding
-            '-preset', 'fast',  # Fast encoding preset
             str(output_path)  # Output path
         ]
         
-        # Execute FFmpeg command
-        result = subprocess.run(
+        # Execute FFmpeg command with progress tracking
+        if progress_callback:
+            progress_callback(0.2, "✂️ Starting video crop (trying hardware acceleration)...")
+            
+        # Try hardware acceleration first
+        cmd = hw_cmd
+        use_hardware = True
+        
+        process = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=300  # 5 minute timeout
+            universal_newlines=True
         )
         
-        if result.returncode == 0:
+        # Monitor progress during cropping
+        while True:
+            output = process.stderr.readline()
+            if output == '' and process.poll() is not None:
+                break
+            if output and progress_callback:
+                # Look for frame progress in FFmpeg output
+                if 'frame=' in output:
+                    try:
+                        frame_info = output.split('frame=')[1].split()[0]
+                        if frame_info.isdigit():
+                            # Progress from 20% to 90%
+                            progress = min(0.9, 0.2 + (int(frame_info) / 1000) * 0.7)
+                            progress_callback(progress, f"✂️ Cropping... frame {frame_info}")
+                    except:
+                        pass
+        
+        result = process.poll()
+        if result == 0:
+            if progress_callback:
+                hw_msg = " (hardware accelerated)" if use_hardware else " (software fallback)"
+                progress_callback(1.0, f"✅ Video cropped successfully: {crop_width}x{crop_height}{hw_msg}")
             print(f"✅ Video cropped successfully: {crop_width}x{crop_height} from ({x1},{y1})")
             return output_path
         else:
-            print(f"❌ FFmpeg crop failed: {result.stderr}")
-            return None
+            stderr_output = process.stderr.read()
+            
+            # If hardware acceleration failed, try software fallback
+            if use_hardware and ("videotoolbox" in stderr_output.lower() or "hardware" in stderr_output.lower()):
+                print("⚠️ Hardware acceleration failed, falling back to software encoding...")
+                if progress_callback:
+                    progress_callback(0.2, "⚠️ Hardware failed, trying software encoding...")
+                
+                # Try software fallback
+                use_hardware = False
+                process = subprocess.Popen(
+                    sw_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    universal_newlines=True
+                )
+                
+                # Monitor progress for fallback
+                while True:
+                    output = process.stderr.readline()
+                    if output == '' and process.poll() is not None:
+                        break
+                    if output and progress_callback:
+                        if 'frame=' in output:
+                            try:
+                                frame_info = output.split('frame=')[1].split()[0]
+                                if frame_info.isdigit():
+                                    progress = min(0.9, 0.2 + (int(frame_info) / 1000) * 0.7)
+                                    progress_callback(progress, f"✂️ Cropping (software)... frame {frame_info}")
+                            except:
+                                pass
+                
+                result = process.poll()
+                if result == 0:
+                    if progress_callback:
+                        progress_callback(1.0, f"✅ Video cropped successfully: {crop_width}x{crop_height} (software fallback)")
+                    print(f"✅ Video cropped successfully with software fallback: {crop_width}x{crop_height}")
+                    return output_path
+                else:
+                    stderr_output = process.stderr.read()
+                    print(f"❌ FFmpeg crop failed (software fallback): {stderr_output}")
+                    return None
+            else:
+                print(f"❌ FFmpeg crop failed: {stderr_output}")
+                return None
             
     except subprocess.TimeoutExpired:
         print("❌ Video cropping timed out (>5 minutes)")
         return None
     except Exception as e:
         print(f"❌ Video cropping error: {str(e)}")
+        return None
+
+
+def apply_video_stabilization_tracking_simple(video_path: Path, x1: int, y1: int, x2: int, y2: int, 
+                                            output_width: int = 800, output_height: int = 600,
+                                            fps: float = 3.0, progress_callback=None) -> Optional[Path]:
+    """
+    Simplified stabilization using basic FFmpeg filters (fallback if vidstab not available)
+    """
+    try:
+        # Calculate center point of the tracking area
+        center_x = (x1 + x2) // 2
+        center_y = (y1 + y2) // 2
+        track_width = x2 - x1
+        track_height = y2 - y1
+        
+        # Ensure even dimensions for video encoding compatibility
+        if output_width % 2 != 0:
+            output_width -= 1
+        if output_height % 2 != 0:
+            output_height -= 1
+            
+        # Create output path
+        output_path = video_path.parent / f"{video_path.stem}_stabilized{video_path.suffix}"
+        
+        if progress_callback:
+            progress_callback(0.1, "🎯 Starting simplified stabilization...")
+        
+        # Simple stabilization using deshake + crop + scale
+        filter_chain = (
+            # First downsample to target FPS to match AI processing
+            f'fps={fps},'
+            # Apply basic deshake stabilization
+            f'deshake=x=-1:y=-1:w=-1:h=-1:rx=32:ry=32,'
+            # Crop to focus on speedometer area with padding
+            f'crop={track_width + 100}:{track_height + 100}:{center_x - 50}:{center_y - 50},'
+            # Scale to desired output size
+            f'scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,'
+            # Add padding if needed to maintain exact dimensions
+            f'pad={output_width}:{output_height}:(ow-iw)/2:(oh-ih)/2:color=black'
+        )
+        
+        # Hardware accelerated command
+        hw_cmd = [
+            'ffmpeg',
+            '-y',  # Overwrite output file
+            '-hwaccel', 'videotoolbox',  # M2 hardware acceleration
+            '-i', str(video_path),  # Input video
+            '-vf', filter_chain,
+            '-c:v', 'h264_videotoolbox',  # M2 hardware encoder
+            '-b:v', '5M',  # Target bitrate for hardware encoder
+            '-q:v', '50',  # Quality setting for VideoToolbox
+            '-c:a', 'copy',  # Copy audio without re-encoding
+            str(output_path)  # Output path
+        ]
+        
+        # Software fallback command
+        sw_cmd = [
+            'ffmpeg',
+            '-y',  # Overwrite output file  
+            '-i', str(video_path),  # Input video
+            '-vf', filter_chain,
+            '-c:v', 'libx264',  # Software H.264 codec
+            '-preset', 'fast',  # Fast encoding preset
+            '-crf', '23',  # Good quality
+            '-c:a', 'copy',  # Copy audio without re-encoding
+            str(output_path)  # Output path
+        ]
+        
+        # Try hardware acceleration first
+        if progress_callback:
+            progress_callback(0.3, "🎯 Applying simplified stabilization (trying hardware)...")
+        
+        cmd = hw_cmd
+        use_hardware = True
+        
+        # Run stabilization with progress tracking
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            universal_newlines=True
+        )
+        
+        # Monitor progress
+        while True:
+            output = process.stderr.readline()
+            if output == '' and process.poll() is not None:
+                break
+            if output and progress_callback:
+                if 'frame=' in output:
+                    try:
+                        frame_info = output.split('frame=')[1].split()[0]
+                        if frame_info.isdigit():
+                            estimated_duration = 60
+                            estimated_total_frames = int(estimated_duration * fps)
+                            frame_progress = min(1.0, int(frame_info) / max(estimated_total_frames, 1))
+                            progress = min(0.95, 0.3 + frame_progress * 0.65)
+                            progress_callback(progress, f"🎯 Stabilizing... frame {frame_info} ({fps} FPS)")
+                    except:
+                        pass
+        
+        result = process.poll()
+        if result == 0:
+            if progress_callback:
+                hw_msg = " (hardware accelerated)" if use_hardware else " (software fallback)"
+                progress_callback(1.0, f"✅ Video stabilized successfully: {output_width}x{output_height}{hw_msg}")
+            print(f"✅ Video stabilized successfully: {output_width}x{output_height}")
+            return output_path
+        else:
+            stderr_output = process.stderr.read()
+            
+            # If hardware acceleration failed, try software fallback
+            if use_hardware and ("videotoolbox" in stderr_output.lower() or "hardware" in stderr_output.lower()):
+                print("⚠️ Hardware acceleration failed, falling back to software...")
+                if progress_callback:
+                    progress_callback(0.3, "⚠️ Hardware failed, trying software...")
+                
+                # Try software fallback
+                use_hardware = False
+                process = subprocess.Popen(
+                    sw_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    universal_newlines=True
+                )
+                
+                # Monitor progress for fallback
+                while True:
+                    output = process.stderr.readline()
+                    if output == '' and process.poll() is not None:
+                        break
+                    if output and progress_callback:
+                        if 'frame=' in output:
+                            try:
+                                frame_info = output.split('frame=')[1].split()[0]
+                                if frame_info.isdigit():
+                                    estimated_duration = 60
+                                    estimated_total_frames = int(estimated_duration * fps)
+                                    frame_progress = min(1.0, int(frame_info) / max(estimated_total_frames, 1))
+                                    progress = min(0.95, 0.3 + frame_progress * 0.65)
+                                    progress_callback(progress, f"🎯 Stabilizing (software)... frame {frame_info} ({fps} FPS)")
+                            except:
+                                pass
+                
+                result = process.poll()
+                if result == 0:
+                    if progress_callback:
+                        progress_callback(1.0, f"✅ Video stabilized successfully: {output_width}x{output_height} (software fallback)")
+                    print(f"✅ Video stabilized with software fallback: {output_width}x{output_height}")
+                    return output_path
+                else:
+                    stderr_output = process.stderr.read()
+                    print(f"❌ Simplified stabilization failed (software fallback): {stderr_output}")
+                    return None
+            else:
+                print(f"❌ Simplified stabilization failed: {stderr_output}")
+                return None
+                
+    except Exception as e:
+        print(f"❌ Error during simplified stabilization: {e}")
+        return None
+
+
+def apply_video_stabilization_tracking(video_path: Path, x1: int, y1: int, x2: int, y2: int, 
+                                     output_width: int = 800, output_height: int = 600,
+                                     fps: float = 3.0, progress_callback=None) -> Optional[Path]:
+    """
+    Advanced video stabilization that tracks and keeps the speedometer area centered using FFmpeg
+    
+    This function uses motion detection and tracking to keep the specified speedometer area
+    stable and centered in the output video, compensating for camera shake and movement.
+    Only processes frames at the specified FPS rate (same as will be sent to AI).
+    
+    Args:
+        video_path: Path to the input video file
+        x1, y1: Top-left coordinates of the area to track and keep centered
+        x2, y2: Bottom-right coordinates of the area to track and keep centered  
+        output_width: Width of the stabilized output video
+        output_height: Height of the stabilized output video
+        fps: Frames per second to process (should match AI analysis FPS)
+        progress_callback: Optional callback for progress updates
+        
+    Returns:
+        Path to the stabilized video file, or None if processing failed
+    """
+    try:
+        import tempfile
+        
+        # Calculate center point of the tracking area
+        center_x = (x1 + x2) // 2
+        center_y = (y1 + y2) // 2
+        track_width = x2 - x1
+        track_height = y2 - y1
+        
+        # Ensure even dimensions for video encoding compatibility
+        if output_width % 2 != 0:
+            output_width -= 1
+        if output_height % 2 != 0:
+            output_height -= 1
+            
+        # Create output path
+        output_path = video_path.parent / f"{video_path.stem}_stabilized{video_path.suffix}"
+        
+        # Create temporary file for motion vectors
+        with tempfile.NamedTemporaryFile(suffix='.trf', delete=False) as motion_file:
+            motion_vectors_path = motion_file.name
+        
+        try:
+            # Step 1: Detect motion vectors focusing on our tracking area
+            if progress_callback:
+                progress_callback(0.1, "🔍 Analyzing motion in speedometer area...")
+            print("🔍 Analyzing motion in speedometer area...")
+            
+            detect_cmd = [
+                'ffmpeg',
+                '-y',  # Overwrite output file
+                '-i', str(video_path),  # Input video
+                '-vf', 
+                # First downsample to target FPS, then analyze motion
+                f'fps={fps},vidstabdetect=stepsize=6:shakiness=8:accuracy=9:result={motion_vectors_path}:tripod=0',
+                '-f', 'null',  # No output file for detection pass
+                '-'
+            ]
+            
+            # Run motion detection with progress tracking
+            process = subprocess.Popen(
+                detect_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                universal_newlines=True
+            )
+            
+            # Monitor progress during detection
+            while True:
+                output = process.stderr.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output and progress_callback:
+                    # Look for frame progress in FFmpeg output
+                    if 'frame=' in output:
+                        try:
+                            frame_info = output.split('frame=')[1].split()[0]
+                            if frame_info.isdigit():
+                                # Calculate expected total frames based on FPS
+                                # Get video duration first (rough estimate)
+                                estimated_duration = 60  # Default assumption
+                                estimated_total_frames = int(estimated_duration * fps)
+                                
+                                # Progress from 10% to 45% during detection
+                                frame_progress = min(1.0, int(frame_info) / max(estimated_total_frames, 1))
+                                progress = min(0.45, 0.1 + frame_progress * 0.35)
+                                progress_callback(progress, f"🔍 Analyzing motion... frame {frame_info} ({fps} FPS)")
+                        except:
+                            pass
+            
+            detect_result = process.poll()
+            if detect_result != 0:
+                stderr_output = process.stderr.read()
+                print(f"\n🔍 DEBUGGING Motion Detection Failure:")
+                print(f"Exit code: {detect_result}")
+                print(f"Full stderr output: {stderr_output}")
+                print(f"Command that failed: {' '.join(detect_cmd)}")
+                print(f"Video path: {video_path}")
+                print(f"Motion vectors path: {motion_vectors_path}")
+                
+                if progress_callback:
+                    progress_callback(0.3, f"❌ Motion detection failed (see console for details)")
+                return None
+                
+            if progress_callback:
+                progress_callback(0.5, "✅ Motion analysis complete")
+            print("✅ Motion analysis complete")
+            
+            # Step 2: Apply stabilization with tracking to keep speedometer centered
+            if progress_callback:
+                progress_callback(0.6, "🎯 Stabilizing video to keep speedometer centered...")
+            print("🎯 Stabilizing video to keep speedometer centered...")
+            
+            # Build complex filter chain for tracking and stabilization
+            filter_chain = (
+                # First downsample to target FPS to match AI processing
+                f'fps={fps},'
+                # Apply motion compensation/stabilization
+                f'vidstabtransform=input={motion_vectors_path}:zoom=0:smoothing=30:crop=black:invert=0,'
+                # Crop to focus on stabilized speedometer area with some padding
+                f'crop={track_width + 200}:{track_height + 150}:{center_x - 100}:{center_y - 75},'
+                # Scale to desired output size
+                f'scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,'
+                # Add padding if needed to maintain exact dimensions
+                f'pad={output_width}:{output_height}:(ow-iw)/2:(oh-ih)/2:color=black'
+            )
+            
+            # Hardware accelerated command
+            hw_stabilize_cmd = [
+                'ffmpeg',
+                '-y',  # Overwrite output file
+                '-hwaccel', 'videotoolbox',  # M2 hardware acceleration
+                '-i', str(video_path),  # Input video
+                '-vf', filter_chain,
+                '-c:v', 'h264_videotoolbox',  # M2 hardware encoder
+                '-b:v', '5M',  # Target bitrate for hardware encoder
+                '-q:v', '50',  # Quality setting for VideoToolbox (lower = better)
+                '-c:a', 'copy',  # Copy audio without re-encoding
+                str(output_path)  # Output path
+            ]
+            
+            # Software fallback command
+            sw_stabilize_cmd = [
+                'ffmpeg',
+                '-y',  # Overwrite output file  
+                '-i', str(video_path),  # Input video
+                '-vf', filter_chain,
+                '-c:v', 'libx264',  # Software H.264 codec
+                '-preset', 'medium',  # Balanced encoding preset
+                '-crf', '23',  # Good quality
+                '-c:a', 'copy',  # Copy audio without re-encoding
+                str(output_path)  # Output path
+            ]
+            
+            # Try hardware acceleration first
+            if progress_callback:
+                progress_callback(0.6, "🎯 Stabilizing video (trying hardware acceleration)...")
+            
+            stabilize_cmd = hw_stabilize_cmd
+            use_hardware = True
+            
+            # Run stabilization with progress tracking
+            process = subprocess.Popen(
+                stabilize_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                universal_newlines=True
+            )
+            
+            # Monitor progress during stabilization
+            while True:
+                output = process.stderr.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output and progress_callback:
+                    # Look for frame progress in FFmpeg output
+                    if 'frame=' in output:
+                        try:
+                            frame_info = output.split('frame=')[1].split()[0]
+                            if frame_info.isdigit():
+                                # Calculate expected total frames based on FPS
+                                estimated_duration = 60  # Default assumption
+                                estimated_total_frames = int(estimated_duration * fps)
+                                
+                                # Progress from 60% to 95% during stabilization
+                                frame_progress = min(1.0, int(frame_info) / max(estimated_total_frames, 1))
+                                progress = min(0.95, 0.6 + frame_progress * 0.35)
+                                progress_callback(progress, f"🎯 Stabilizing... frame {frame_info} ({fps} FPS)")
+                        except:
+                            pass
+            
+            stabilize_result = process.poll()
+            if stabilize_result == 0:
+                if progress_callback:
+                    hw_msg = " (hardware accelerated)" if use_hardware else " (software fallback)"
+                    progress_callback(1.0, f"✅ Video stabilized successfully: {output_width}x{output_height}{hw_msg}")
+                print(f"✅ Video stabilized successfully: {output_width}x{output_height}")
+                print(f"🎯 Speedometer area tracked and kept centered")
+                return output_path
+            else:
+                stderr_output = process.stderr.read()
+                
+                # If hardware acceleration failed, try software fallback
+                if use_hardware and ("videotoolbox" in stderr_output.lower() or "hardware" in stderr_output.lower()):
+                    print("⚠️ Hardware acceleration failed for stabilization, falling back to software...")
+                    if progress_callback:
+                        progress_callback(0.6, "⚠️ Hardware failed, trying software stabilization...")
+                    
+                    # Try software fallback
+                    use_hardware = False
+                    process = subprocess.Popen(
+                        sw_stabilize_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        universal_newlines=True
+                    )
+                    
+                    # Monitor progress for fallback
+                    while True:
+                        output = process.stderr.readline()
+                        if output == '' and process.poll() is not None:
+                            break
+                        if output and progress_callback:
+                            if 'frame=' in output:
+                                try:
+                                    frame_info = output.split('frame=')[1].split()[0]
+                                    if frame_info.isdigit():
+                                        estimated_duration = 60
+                                        estimated_total_frames = int(estimated_duration * fps)
+                                        frame_progress = min(1.0, int(frame_info) / max(estimated_total_frames, 1))
+                                        progress = min(0.95, 0.6 + frame_progress * 0.35)
+                                        progress_callback(progress, f"🎯 Stabilizing (software)... frame {frame_info} ({fps} FPS)")
+                                except:
+                                    pass
+                    
+                    stabilize_result = process.poll()
+                    if stabilize_result == 0:
+                        if progress_callback:
+                            progress_callback(1.0, f"✅ Video stabilized successfully: {output_width}x{output_height} (software fallback)")
+                        print(f"✅ Video stabilized with software fallback: {output_width}x{output_height}")
+                        return output_path
+                    else:
+                        stderr_output = process.stderr.read()
+                        print(f"❌ Video stabilization failed (software fallback): {stderr_output}")
+                        return None
+                else:
+                    print(f"❌ Advanced stabilization failed (exit code {stabilize_result}): {stderr_output}")
+                    # Check if it's a vidstab filter issue
+                    if "vidstab" in stderr_output.lower() or "unknown filter" in stderr_output.lower():
+                        print("⚠️ Advanced stabilization not available, falling back to simplified stabilization...")
+                        if progress_callback:
+                            progress_callback(0.6, "⚠️ Falling back to simplified stabilization...")
+                        return apply_video_stabilization_tracking_simple(video_path, x1, y1, x2, y2, output_width, output_height, fps, progress_callback)
+                    else:
+                        if progress_callback:
+                            progress_callback(0.8, f"❌ Stabilization failed: {stderr_output[:100]}...")
+                        return None
+                
+        finally:
+            # Clean up temporary motion vectors file
+            try:
+                Path(motion_vectors_path).unlink()
+            except:
+                pass
+                
+    except Exception as e:
+        print(f"❌ Error during video stabilization: {e}")
+        return None
+
+
+def apply_opencv_speedometer_tracking(video_path: Path, x1: int, y1: int, x2: int, y2: int,
+                                    output_width: int = 800, output_height: int = 600,
+                                    fps: float = 3.0, progress_callback=None) -> Optional[Path]:
+    """
+    OpenCV-based speedometer tracking that keeps the selected area centered and in view
+    
+    Uses advanced OpenCV tracking algorithms to follow the speedometer area throughout
+    the video and maintains it in the center of the output frame.
+    
+    Args:
+        video_path: Path to input video
+        x1, y1, x2, y2: Initial bounding box coordinates for speedometer area
+        output_width, output_height: Output video dimensions
+        fps: Target FPS for processing
+        progress_callback: Optional callback for progress updates
+    
+    Returns:
+        Path to processed video or None if failed
+    """
+    try:
+        import cv2
+        import numpy as np
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = video_path.parent / f"opencv_tracked_{timestamp}.mp4"
+        
+        # Open input video
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            print("❌ Failed to open video file")
+            return None
+            
+        # Get video properties
+        original_fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        print(f"🎯 Starting OpenCV speedometer tracking...")
+        print(f"📐 Initial tracking area: ({x1}, {y1}) to ({x2}, {y2})")
+        print(f"🎬 Video: {frame_width}x{frame_height} @ {original_fps:.1f} FPS, {total_frames} frames")
+        
+        # Calculate frame processing interval
+        frame_interval = max(1, int(original_fps / fps))
+        
+        # Read first frame to extract template
+        ret, frame = cap.read()
+        if not ret:
+            print("❌ Failed to read first frame")
+            return None
+        
+        # Set up video writer with browser-compatible codec
+        # Try different codecs for maximum compatibility
+        codecs_to_try = ['avc1', 'H264', 'XVID', 'mp4v']
+        out = None
+        
+        for codec in codecs_to_try:
+            try:
+                fourcc = cv2.VideoWriter_fourcc(*codec)
+                out = cv2.VideoWriter(str(output_path), fourcc, fps, (output_width, output_height))
+                if out.isOpened():
+                    print(f"✅ Using codec: {codec}")
+                    break
+                else:
+                    out.release()
+                    out = None
+            except:
+                continue
+                
+        if out is None:
+            print("❌ Failed to initialize video writer")
+            return None
+        
+        # Use template matching instead of complex trackers for better compatibility
+        print("🎯 Using template matching for speedometer tracking...")
+        
+        # Extract initial template from first frame
+        template = frame[y1:y2, x1:x2]
+        template_h, template_w = template.shape[:2]
+        
+        print("✅ Template matching initialized successfully")
+        if progress_callback:
+            progress_callback(5, "Template matching initialized")
+        
+        # Reset video capture to beginning
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        
+        frame_count = 0
+        processed_frames = 0
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            frame_count += 1
+            
+            # Process only every Nth frame based on target FPS
+            if frame_count % frame_interval != 0:
+                continue
+                
+            processed_frames += 1
+            
+            # Use template matching to find speedometer
+            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray_template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+            
+            # Perform template matching
+            result = cv2.matchTemplate(gray_frame, gray_template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+            
+            # If match confidence is good enough, use the matched location
+            if max_val > 0.6:  # Good match threshold
+                # Update tracking position
+                x, y = max_loc
+                w, h = template_w, template_h
+                
+                # Ensure bounding box is within frame bounds
+                x = max(0, min(x, frame_width - w))
+                y = max(0, min(y, frame_height - h))
+                w = min(w, frame_width - x)
+                h = min(h, frame_height - y)
+                
+                # Extract the tracked region
+                tracked_region = frame[y:y+h, x:x+w]
+                
+                # Resize to output dimensions
+                if tracked_region.size > 0:
+                    resized_region = cv2.resize(tracked_region, (output_width, output_height))
+                    out.write(resized_region)
+                else:
+                    # Fallback to original area
+                    fallback_region = frame[y1:y2, x1:x2]
+                    if fallback_region.size > 0:
+                        resized_fallback = cv2.resize(fallback_region, (output_width, output_height))
+                        out.write(resized_fallback)
+                    else:
+                        black_frame = np.zeros((output_height, output_width, 3), dtype=np.uint8)
+                        out.write(black_frame)
+                        
+            else:
+                # Low confidence match - use original crop area
+                fallback_region = frame[y1:y2, x1:x2]
+                if fallback_region.size > 0:
+                    resized_fallback = cv2.resize(fallback_region, (output_width, output_height))
+                    out.write(resized_fallback)
+                else:
+                    black_frame = np.zeros((output_height, output_width, 3), dtype=np.uint8)
+                    out.write(black_frame)
+            
+            # Update progress
+            if progress_callback and processed_frames % 10 == 0:
+                progress_pct = int((frame_count / total_frames) * 100)
+                progress_callback(progress_pct, f"Tracking frame {frame_count}/{total_frames}")
+        
+        # Clean up
+        cap.release()
+        out.release()
+        
+        print(f"✅ OpenCV tracking completed! Processed {processed_frames} frames")
+        if progress_callback:
+            progress_callback(95, "Converting to browser-compatible format...")
+        
+        # Convert to browser-compatible format using FFmpeg
+        final_output_path = output_path.parent / f"final_{output_path.name}"
+        
+        try:
+            convert_cmd = [
+                'ffmpeg', '-y',
+                '-i', str(output_path),
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-crf', '23',
+                '-pix_fmt', 'yuv420p',  # Ensures compatibility
+                '-movflags', '+faststart',  # Enables progressive download
+                str(final_output_path)
+            ]
+            
+            result = subprocess.run(convert_cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                # Remove intermediate file and use final output
+                output_path.unlink()
+                output_path = final_output_path
+                print("✅ Video converted to browser-compatible format")
+            else:
+                print("⚠️ Video conversion failed, using original format")
+                
+        except Exception as e:
+            print(f"⚠️ Video conversion failed: {e}")
+        
+        if progress_callback:
+            progress_callback(100, "OpenCV tracking complete!")
+            
+        return output_path
+        
+    except ImportError:
+        print("❌ OpenCV not available. Install with: pip install opencv-python")
+        return None
+    except Exception as e:
+        print(f"❌ Error during OpenCV tracking: {e}")
         return None

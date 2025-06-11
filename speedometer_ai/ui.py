@@ -17,8 +17,10 @@ from speedometer_ai.utils import (
     save_results_to_csv, 
     validate_video_file,
     check_ffmpeg_available,
-    apply_video_crop
+    apply_video_crop,
+    apply_opencv_speedometer_tracking
 )
+
 
 
 def load_secrets():
@@ -58,8 +60,11 @@ def render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_
     if has_results:
         # Show compact summary when in expander
         results_data = st.session_state.analysis_results
-        video_name = results_data.get('video_name', 'Unknown')
-        st.caption(f"✅ Analyzed: {video_name}")
+        if results_data:
+            video_name = results_data.get('video_name', 'Unknown')
+            st.caption(f"✅ Analyzed: {video_name}")
+        else:
+            st.caption("No analysis results available")
     
     uploaded_file = st.file_uploader(
         "Choose a dashboard video file",
@@ -69,6 +74,24 @@ def render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_
     )
     
     if uploaded_file is not None:
+        # Check if this is a new video file and reset state if needed
+        if 'current_video_name' not in st.session_state or st.session_state.current_video_name != uploaded_file.name:
+            # Reset all session state when new video is uploaded
+            st.session_state.current_video_name = uploaded_file.name
+            st.session_state.processed_video_path = None
+            st.session_state.analysis_results = None
+            st.session_state.processing_complete = False
+            st.session_state.analysis_complete = False
+            # Reset crop values to defaults
+            if 'crop_width' in st.session_state:
+                del st.session_state.crop_width
+            if 'crop_height' in st.session_state:
+                del st.session_state.crop_height
+            if 'crop_x_pos' in st.session_state:
+                del st.session_state.crop_x_pos
+            if 'crop_y_pos' in st.session_state:
+                del st.session_state.crop_y_pos
+            
         # Save uploaded file temporarily
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
             tmp_file.write(uploaded_file.read())
@@ -80,11 +103,21 @@ def render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_
         crop_col1, crop_col2 = st.columns([1, 1])
         
         with crop_col1:
-            # Add video cropping functionality
-            st.subheader("✂️ Video Cropping (Optional)")
-            st.caption("Crop the video to focus on the speedometer area for better accuracy and faster processing")
+            # Add video processing functionality
+            st.subheader("🎯 Video Processing (Optional)")
+            st.caption("Process the video to focus on the speedometer area for better accuracy and faster processing")
             
-            crop_video = st.checkbox("Enable video cropping", False, help="Crop the video to focus on speedometer area")
+            processing_mode = st.selectbox(
+                "Processing Mode",
+                ["None", "Basic Crop", "Ultra Tracking"],
+                index=0,
+                help="• None: Use original video\n• Basic Crop: Static crop to speedometer area\n• Ultra Tracking: Smart tracking that follows the speedometer area"
+            )
+            
+            if processing_mode == "Ultra Tracking":
+                st.info(f"ℹ️ **Smart Processing**: Will only process frames at {fps} FPS (same rate as AI analysis) for maximum efficiency")
+            
+            crop_video = processing_mode != "None"
             
             if crop_video:
                 # Get video dimensions for cropping interface
@@ -100,69 +133,127 @@ def render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_
                         
                         st.markdown("**Crop Area Selection**")
                         
-                        # X coordinates
-                        crop_x1 = st.slider(
-                            "Left edge (X start)",
-                            min_value=0,
-                            max_value=original_width-1,
-                            value=0,
-                            help="Left boundary of crop area"
-                        )
+                        # Initialize crop values in session state if not already set
+                        if 'crop_width' not in st.session_state:
+                            st.session_state.crop_width = min(400, original_width // 2)
+                        if 'crop_height' not in st.session_state:
+                            st.session_state.crop_height = min(300, original_height // 2)
+                        if 'crop_x_pos' not in st.session_state:
+                            st.session_state.crop_x_pos = original_width // 4
+                        if 'crop_y_pos' not in st.session_state:
+                            st.session_state.crop_y_pos = original_height // 4
                         
-                        crop_x2 = st.slider(
-                            "Right edge (X end)",
-                            min_value=crop_x1+1,
+                        # Crop box size controls
+                        st.markdown("**📏 Crop Box Size**")
+                        
+                        # Width and height sliders for smooth, instant updates
+                        crop_width = st.slider(
+                            "Width",
+                            min_value=50,
                             max_value=original_width,
-                            value=original_width,
-                            help="Right boundary of crop area"
+                            help="Width of the crop area",
+                            key="crop_width"
                         )
                         
-                        # Y coordinates
-                        crop_y1 = st.slider(
-                            "Top edge (Y start)",
-                            min_value=0,
-                            max_value=original_height-1,
-                            value=0,
-                            help="Top boundary of crop area"
-                        )
-                        
-                        crop_y2 = st.slider(
-                            "Bottom edge (Y end)",
-                            min_value=crop_y1+1,
+                        crop_height = st.slider(
+                            "Height",
+                            min_value=50, 
                             max_value=original_height,
-                            value=original_height,
-                            help="Bottom boundary of crop area"
+                            help="Height of the crop area",
+                            key="crop_height"
                         )
                         
-                        # Calculate crop dimensions
-                        crop_width = crop_x2 - crop_x1
-                        crop_height = crop_y2 - crop_y1
+                        # Crop box position controls
+                        st.markdown("**📍 Crop Box Position**")
+                        crop_x_pos = st.slider(
+                            "Horizontal Position",
+                            min_value=0,
+                            max_value=max(0, original_width - crop_width),
+                            help="Move crop box left/right",
+                            key="crop_x_pos"
+                        )
                         
-                        st.success(f"🎯 Crop area: {crop_width} x {crop_height} pixels")
+                        crop_y_pos = st.slider(
+                            "Vertical Position",
+                            min_value=0,
+                            max_value=max(0, original_height - crop_height),
+                            help="Move crop box up/down",
+                            key="crop_y_pos"
+                        )
                         
-                        # Apply cropping
-                        if st.button("✂️ Apply Crop to Video", type="primary"):
-                            with st.spinner("Cropping video..."):
-                                cropped_video_path = apply_video_crop(
-                                    temp_video_path, 
-                                    crop_x1, crop_y1, crop_x2, crop_y2
-                                )
-                                
-                                if cropped_video_path:
-                                    temp_video_path = cropped_video_path  # Use cropped video for analysis
-                                    st.success(f"✅ Video cropped successfully! New dimensions: {crop_width} x {crop_height}")
+                        # Calculate coordinates for compatibility with existing code
+                        crop_x1 = crop_x_pos
+                        crop_y1 = crop_y_pos
+                        crop_x2 = crop_x_pos + crop_width
+                        crop_y2 = crop_y_pos + crop_height
+                        
+                        st.success(f"🎯 Crop area: {crop_width} x {crop_height} pixels at position ({crop_x1}, {crop_y1})")
+                        
+                        # Apply processing based on selected mode
+                        button_text = {
+                            "Basic Crop": "✂️ Apply Basic Crop",
+                            "Ultra Tracking": "🚀 Apply Ultra Tracking"
+                        }.get(processing_mode, "✂️ Apply Processing")
+                        
+                        if st.button(button_text, type="primary"):
+                            # Create progress indicators
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            def progress_callback(progress: float, message: str):
+                                progress_bar.progress(progress)
+                                status_text.text(message)
+                            
+                            try:
+                                if processing_mode == "Basic Crop":
+                                    progress_callback(0.1, "✂️ Preparing video crop...")
+                                    processed_video_path = apply_video_crop(
+                                        temp_video_path, 
+                                        crop_x1, crop_y1, crop_x2, crop_y2,
+                                        progress_callback=progress_callback
+                                    )
+                                    success_msg = f"✅ Video cropped successfully! New dimensions: {crop_width} x {crop_height}"
+                                        
+                                elif processing_mode == "Ultra Tracking":
+                                    progress_callback(0.05, f"🎯 Preparing OpenCV tracking at {fps} FPS...")
+                                    processed_video_path = apply_opencv_speedometer_tracking(
+                                        temp_video_path,
+                                        crop_x1, crop_y1, crop_x2, crop_y2,
+                                        output_width=800, output_height=600,
+                                        fps=fps,
+                                        progress_callback=progress_callback
+                                    )
+                                    success_msg = f"✅ OpenCV tracking complete at {fps} FPS! Speedometer tracked and centered: 800x600"
+                            
+                                if processed_video_path:
+                                    temp_video_path = processed_video_path  # Use processed video for analysis
+                                    st.success(success_msg)
                                     
-                                    # Store crop info and cropped video path in session state
-                                    st.session_state.crop_applied = True
-                                    st.session_state.cropped_video_path = str(cropped_video_path)
+                                    # Store processing info and video path in session state
+                                    st.session_state.processing_complete = True
+                                    st.session_state.processed_video_path = str(processed_video_path)
+                                    st.session_state.processing_mode = processing_mode
                                     st.session_state.crop_info = {
                                         'original_size': (original_width, original_height),
                                         'crop_area': (crop_x1, crop_y1, crop_x2, crop_y2),
-                                        'cropped_size': (crop_width, crop_height)
+                                        'processing_mode': processing_mode,
+                                        'processed_size': (800, 600) if processing_mode != "Basic Crop" else (crop_width, crop_height)
                                     }
-                                    st.rerun()  # Refresh to show cropped video in preview
+                                    
+                                    # Clean up progress indicators
+                                    progress_bar.empty()
+                                    status_text.empty()
+                                    
+                                    st.rerun()  # Refresh to show processed video in preview
                                 else:
-                                    st.error("❌ Failed to crop video")
+                                    progress_bar.empty()
+                                    status_text.empty()
+                                    st.error(f"❌ Failed to process video with {processing_mode}")
+                                    
+                            except Exception as e:
+                                progress_bar.empty()
+                                status_text.empty()
+                                st.error(f"❌ Error during {processing_mode}: {str(e)}")
                     else:
                         st.error("❌ Could not read video for cropping")
                         cap.release()
@@ -171,7 +262,12 @@ def render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_
         
         with crop_col2:
             if crop_video:
-                st.markdown("**Crop Area Visualization**")
+                mode_titles = {
+                    "Basic Crop": "**Crop Area Visualization**",
+                    "Advanced Stabilization": "**Tracking Area for Stabilization**", 
+                    "Ultra Tracking": "**Area to Track & Keep Centered**"
+                }
+                st.markdown(mode_titles.get(processing_mode, "**Processing Area**"))
                 
                 # Show crop rectangle on original frame
                 try:
@@ -179,20 +275,33 @@ def render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_
                     cap = cv2.VideoCapture(str(temp_video_path))
                     ret, frame = cap.read()
                     if ret:
-                        # Draw crop rectangle on the frame
+                        # Draw rectangle on the frame with color coding
                         preview_frame = frame.copy()
-                        cv2.rectangle(preview_frame, (crop_x1, crop_y1), (crop_x2, crop_y2), (0, 255, 0), 3)
+                        color = {
+                            "Basic Crop": (0, 255, 0),      # Green for basic crop
+                            "Advanced Stabilization": (255, 0, 0),  # Blue for stabilization  
+                            "Ultra Tracking": (0, 0, 255)    # Red for ultra tracking
+                        }.get(processing_mode, (0, 255, 0))
+                        
+                        cv2.rectangle(preview_frame, (crop_x1, crop_y1), (crop_x2, crop_y2), color, 3)
                         
                         # Save preview image
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_preview:
                             cv2.imwrite(tmp_preview.name, preview_frame)
-                            st.image(tmp_preview.name, caption="Green rectangle shows crop area", use_container_width=True)
+                            
+                            caption_text = {
+                                "Basic Crop": "Green rectangle shows crop area",
+                                "Advanced Stabilization": "Blue rectangle shows area to stabilize and center",
+                                "Ultra Tracking": "Red rectangle shows area for ultra tracking"
+                            }.get(processing_mode, "Rectangle shows processing area")
+                            
+                            st.image(tmp_preview.name, caption=caption_text, use_container_width=True)
                         
                     cap.release()
                 except:
                     pass
             else:
-                st.info("📝 Enable cropping to see crop area visualization")
+                st.info("📝 Select a processing mode to see area visualization")
         
         # Video preview section
         st.markdown("---")
@@ -202,10 +311,15 @@ def render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_
         
         with video_col1:
             st.subheader("📹 Video Preview")
-            # Show cropped video if available, otherwise show original
-            if st.session_state.get('crop_applied', False) and 'cropped_video_path' in st.session_state:
-                st.caption("🎬 Showing cropped video")
-                with open(st.session_state.cropped_video_path, 'rb') as video_file:
+            # Show processed video if available, otherwise show original
+            if st.session_state.get('processing_complete', False) and 'processed_video_path' in st.session_state:
+                processing_mode = st.session_state.get('processing_mode', 'Basic Crop')
+                mode_captions = {
+                    'Basic Crop': '🎬 Showing cropped video',
+                    'Ultra Tracking': '🚀 Showing tracked video'
+                }
+                st.caption(mode_captions.get(processing_mode, '🎬 Showing processed video'))
+                with open(st.session_state.processed_video_path, 'rb') as video_file:
                     st.video(video_file.read(), start_time=0)
             else:
                 st.caption("🎬 Showing original video")
@@ -213,22 +327,36 @@ def render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_
         
         with video_col2:
             if crop_video and 'original_width' in locals():
-                st.subheader("🖼️ Live Crop Preview")
+                preview_titles = {
+                    "Basic Crop": "🖼️ Live Crop Preview",
+                    "Advanced Stabilization": "🎯 Live Tracking Preview", 
+                    "Ultra Tracking": "🚀 Live Tracking Preview"
+                }
+                st.subheader(preview_titles.get(processing_mode, "🖼️ Live Preview"))
+                
                 try:
                     import cv2
                     cap = cv2.VideoCapture(str(temp_video_path))
                     ret, frame = cap.read()
                     if ret:
-                        # Show cropped area at larger size
+                        # Show selected area at larger size
                         cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
                         with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_cropped:
                             cv2.imwrite(tmp_cropped.name, cropped_frame)
-                            st.image(tmp_cropped.name, caption="This area will be analyzed", use_container_width=True)
+                            
+                            preview_captions = {
+                                "Basic Crop": "This exact area will be in the output video",
+                                "Advanced Stabilization": "This area will be tracked and kept centered",
+                                "Ultra Tracking": "This area will be perfectly stabilized and tracked"
+                            }
+                            caption = preview_captions.get(processing_mode, "This area will be processed")
+                            
+                            st.image(tmp_cropped.name, caption=caption, use_container_width=True)
                     cap.release()
                 except:
                     pass
             else:
-                st.info("Enable video cropping to see live preview here")
+                st.info("Select a processing mode to see live preview here")
             
         # Add JavaScript to enable video time control
         st.components.v1.html("""
@@ -282,7 +410,7 @@ def render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_
             # Estimate video duration and frames using appropriate video source
             try:
                 import cv2
-                video_for_estimation = Path(st.session_state.cropped_video_path) if st.session_state.get('crop_applied', False) and 'cropped_video_path' in st.session_state else temp_video_path
+                video_for_estimation = Path(st.session_state.processed_video_path) if st.session_state.get('processing_complete', False) and 'processed_video_path' in st.session_state else temp_video_path
                 cap = cv2.VideoCapture(str(video_for_estimation))
                 frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
                 video_fps = cap.get(cv2.CAP_PROP_FPS)
@@ -305,7 +433,7 @@ def render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_
         # Analysis button
         if st.button("🔍 Analyze Video", type="primary", use_container_width=True):
             # Use cropped video for analysis if available
-            video_to_analyze = Path(st.session_state.cropped_video_path) if st.session_state.get('crop_applied', False) and 'cropped_video_path' in st.session_state else temp_video_path
+            video_to_analyze = Path(st.session_state.processed_video_path) if st.session_state.get('processing_complete', False) and 'processed_video_path' in st.session_state else temp_video_path
             analyze_video(video_to_analyze, api_key, model, fps, delay, parallel_workers, anomaly_detection, max_acceleration, interpolate_gaps, keep_frames, verbose)
 
 
@@ -383,6 +511,7 @@ def main():
             st.subheader("Output Options")
             keep_frames = st.checkbox("Keep extracted frames", False)
             verbose = st.checkbox("Verbose output", False)
+            
     
     # Main content area - upload section (collapsible when results are ready)
     has_results = 'analysis_results' in st.session_state
@@ -395,7 +524,7 @@ def main():
         st.header("📹 Video Upload")
         render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_detection, max_acceleration, interpolate_gaps, keep_frames, verbose)
 
-    # Show a "New Analysis" button when results are available
+    # Show new analysis option when results are available
     if has_results:
         st.markdown("---")
         if st.button("🔄 Start New Analysis", type="secondary", use_container_width=True):
@@ -409,7 +538,7 @@ def main():
     st.header("📊 Results")
     
     # Check for existing results
-    if 'analysis_results' in st.session_state:
+    if 'analysis_results' in st.session_state and st.session_state.analysis_results is not None:
         display_results(st.session_state.analysis_results)
     else:
         st.info("Upload a video and click 'Analyze Video' to see results here")
