@@ -165,10 +165,20 @@ def render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_
                         
                         # Crop box position controls
                         st.markdown("**📍 Crop Box Position**")
+                        
+                        # Calculate safe max positions
+                        max_x_pos = max(0, original_width - crop_width)
+                        max_y_pos = max(0, original_height - crop_height)
+                        
+                        # Constrain current position values to valid ranges
+                        current_x = min(st.session_state.get('crop_x_pos', original_width // 4), max_x_pos)
+                        current_y = min(st.session_state.get('crop_y_pos', original_height // 4), max_y_pos)
+                        
                         crop_x_pos = st.slider(
                             "Horizontal Position",
                             min_value=0,
-                            max_value=max(0, original_width - crop_width),
+                            max_value=max_x_pos,
+                            value=current_x,
                             help="Move crop box left/right",
                             key="crop_x_pos"
                         )
@@ -176,7 +186,8 @@ def render_upload_section(api_key, fps, delay, model, parallel_workers, anomaly_
                         crop_y_pos = st.slider(
                             "Vertical Position",
                             min_value=0,
-                            max_value=max(0, original_height - crop_height),
+                            max_value=max_y_pos,
+                            value=current_y,
                             help="Move crop box up/down",
                             key="crop_y_pos"
                         )

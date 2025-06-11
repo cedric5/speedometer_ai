@@ -1,0 +1,12 @@
+{
+    "gemini_api_key": "AIzaSyC5SdZArWGM7Eed0U-fP6rzx61nqx03yYo",
+    "default_settings": {
+        "fps": 3.0,
+        "delay": 1.0,
+        "model": "gemini-1.5-flash",
+        "parallel_workers": 3,
+        "anomaly_detection": true,
+        "max_acceleration": 16.95,
+        "interpolate_gaps": true
+    }
+}
