@@ -1339,3 +1339,242 @@ def apply_opencv_speedometer_tracking(video_path: Path, x1: int, y1: int, x2: in
     except Exception as e:
         print(f"❌ Error during OpenCV tracking: {e}")
         return None
+
+
+def apply_speed_overlay(video_path: str, results: List[Dict], corner_position: str, 
+                       x_offset: int, y_offset: int, font_size: int, text_color: str,
+                       show_background: bool, bg_opacity: float, progress_callback=None) -> Optional[Path]:
+    """
+    Apply speed data overlay to video using FFmpeg
+    
+    Args:
+        video_path: Path to input video
+        results: List of analysis results with speed data
+        corner_position: Corner for overlay ("Top Left", "Top Right", "Bottom Left", "Bottom Right")
+        x_offset: Horizontal offset from corner in pixels
+        y_offset: Vertical offset from corner in pixels
+        font_size: Size of the overlay text
+        text_color: Color of the text
+        show_background: Whether to show background behind text
+        bg_opacity: Opacity of the background (0.0-1.0)
+        progress_callback: Optional callback for progress updates
+        
+    Returns:
+        Path to output video with overlay or None if failed
+    """
+    try:
+        if progress_callback:
+            progress_callback(0.1, "🎬 Preparing video overlay...")
+        
+        video_path = Path(video_path)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = video_path.parent / f"speed_overlay_{timestamp}.mp4"
+        
+        # Create a subtitle file with speed data
+        subtitle_path = video_path.parent / f"speed_data_{timestamp}.ass"
+        
+        if progress_callback:
+            progress_callback(0.2, "📝 Creating speed data subtitle file...")
+        
+        # Generate ASS subtitle file with speed overlays
+        create_speed_subtitle_file(results, subtitle_path, corner_position, 
+                                  x_offset, y_offset, font_size, text_color, 
+                                  show_background, bg_opacity)
+        
+        if progress_callback:
+            progress_callback(0.4, "🎥 Applying overlay to video...")
+        
+        # FFmpeg command to apply subtitle overlay
+        cmd = [
+            'ffmpeg',
+            '-y',  # Overwrite output file
+            '-i', str(video_path),  # Input video
+            '-vf', f'ass={subtitle_path}',  # Apply ASS subtitles as overlay
+            '-c:v', 'libx264',  # Video codec
+            '-preset', 'medium',  # Encoding preset
+            '-crf', '23',  # Quality
+            '-c:a', 'copy',  # Copy audio without re-encoding
+            str(output_path)  # Output path
+        ]
+        
+        # Try hardware acceleration if available
+        hw_cmd = [
+            'ffmpeg',
+            '-y',  # Overwrite output file
+            '-hwaccel', 'videotoolbox',  # Hardware acceleration
+            '-i', str(video_path),  # Input video
+            '-vf', f'ass={subtitle_path}',  # Apply ASS subtitles as overlay
+            '-c:v', 'h264_videotoolbox',  # Hardware encoder
+            '-b:v', '5M',  # Target bitrate
+            '-c:a', 'copy',  # Copy audio without re-encoding
+            str(output_path)  # Output path
+        ]
+        
+        # Try hardware acceleration first
+        process = subprocess.Popen(
+            hw_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            universal_newlines=True
+        )
+        
+        # Monitor progress
+        while True:
+            output = process.stderr.readline()
+            if output == '' and process.poll() is not None:
+                break
+            if output and progress_callback:
+                if 'frame=' in output:
+                    try:
+                        frame_info = output.split('frame=')[1].split()[0]
+                        if frame_info.isdigit():
+                            # Progress from 40% to 90%
+                            progress = min(0.9, 0.4 + (int(frame_info) / 1000) * 0.5)
+                            progress_callback(progress, f"🎬 Processing frame {frame_info}...")
+                    except:
+                        pass
+        
+        result = process.poll()
+        if result != 0:
+            # Hardware acceleration failed, try software fallback
+            if progress_callback:
+                progress_callback(0.5, "⚠️ Hardware failed, trying software encoding...")
+            
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                universal_newlines=True
+            )
+            
+            # Monitor progress for software encoding
+            while True:
+                output = process.stderr.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output and progress_callback:
+                    if 'frame=' in output:
+                        try:
+                            frame_info = output.split('frame=')[1].split()[0]
+                            if frame_info.isdigit():
+                                progress = min(0.9, 0.5 + (int(frame_info) / 1000) * 0.4)
+                                progress_callback(progress, f"🎬 Processing (software) frame {frame_info}...")
+                        except:
+                            pass
+            
+            result = process.poll()
+        
+        if result == 0:
+            if progress_callback:
+                progress_callback(1.0, "✅ Speed overlay applied successfully!")
+            
+            # Clean up subtitle file
+            try:
+                subtitle_path.unlink()
+            except:
+                pass
+                
+            return output_path
+        else:
+            stderr_output = process.stderr.read()
+            print(f"❌ FFmpeg overlay failed: {stderr_output}")
+            return None
+            
+    except Exception as e:
+        print(f"❌ Error during speed overlay: {e}")
+        return None
+
+
+def create_speed_subtitle_file(results: List[Dict], subtitle_path: Path, corner_position: str,
+                              x_offset: int, y_offset: int, font_size: int, text_color: str,
+                              show_background: bool, bg_opacity: float):
+    """
+    Create an ASS subtitle file with speed data overlays
+    """
+    # Color mapping for ASS format (BGR format)
+    color_map = {
+        "White": "&HFFFFFF",
+        "Yellow": "&H00FFFF", 
+        "Green": "&H00FF00",
+        "Red": "&H0000FF",
+        "Blue": "&HFF0000",
+        "Black": "&H000000"
+    }
+    
+    text_color_code = color_map.get(text_color, "&H00FFFF")  # Default to yellow
+    
+    # Position mapping for ASS alignment
+    if corner_position == "Top Left":
+        alignment = 7  # Top left
+        margin_x = x_offset
+        margin_y = y_offset
+    elif corner_position == "Top Right":
+        alignment = 9  # Top right  
+        margin_x = x_offset
+        margin_y = y_offset
+    elif corner_position == "Bottom Left":
+        alignment = 1  # Bottom left
+        margin_x = x_offset
+        margin_y = y_offset
+    else:  # Bottom Right
+        alignment = 3  # Bottom right
+        margin_x = x_offset
+        margin_y = y_offset
+    
+    # Background settings
+    if show_background:
+        bg_alpha = hex(int((1 - bg_opacity) * 255))[2:].upper().zfill(2)
+        outline_color = f"&H{bg_alpha}000000"  # Semi-transparent black background
+        outline_width = 3
+    else:
+        outline_color = "&H00000000"  # Transparent
+        outline_width = 0
+    
+    # Create ASS subtitle content
+    ass_content = f"""[Script Info]
+Title: Speed Overlay
+ScriptType: v4.00+
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,{font_size},{text_color_code},&HFFFFFF,{outline_color},&H00000000,1,0,0,0,100,100,0,0,1,{outline_width},2,{alignment},{margin_x},{margin_x},{margin_y},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    
+    # Add speed data events
+    for i, result in enumerate(results):
+        if result.get('success', False) and result.get('speed') is not None:
+            # Convert timestamp to ASS time format (hours:minutes:seconds.centiseconds)
+            start_time = result['timestamp']
+            # Each frame shows for duration until next frame (or 1 second for last frame)
+            if i < len(results) - 1:
+                end_time = results[i + 1]['timestamp']
+            else:
+                end_time = start_time + 1.0
+            
+            start_ass = seconds_to_ass_time(start_time)
+            end_ass = seconds_to_ass_time(end_time)
+            
+            speed_text = f"{int(result['speed'])} km/h"
+            
+            ass_content += f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{speed_text}\n"
+    
+    # Write subtitle file
+    with open(subtitle_path, 'w', encoding='utf-8') as f:
+        f.write(ass_content)
+
+
+def seconds_to_ass_time(seconds: float) -> str:
+    """
+    Convert seconds to ASS time format (H:MM:SS.CC)
+    """
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    centiseconds = int((seconds % 1) * 100)
+    
+    return f"{hours}:{minutes:02d}:{secs:02d}.{centiseconds:02d}"

@@ -17,6 +17,7 @@ setup(
         "plotly>=5.0.0",
         "pytest>=7.0.0",
         "pytest-streamlit>=0.3.0",
+        "streamlit-cropper>=0.3.1",
     ],
     entry_points={
         "console_scripts": [
